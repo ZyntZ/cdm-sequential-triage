@@ -1,0 +1,18 @@
+{
+  "as_of_date": "2026-07-24",
+  "dataset": "ESA Collision Avoidance Challenge",
+  "source": "https://kelvins.esa.int/collision-avoidance-challenge/data/",
+  "license": "CC BY 4.0 (Zenodo record 10.5281/zenodo.4463683)",
+  "files": {
+    "train_data.zip": {
+      "bytes": 87718091,
+      "sha256": "68362fe5629cc80f17291f2d73f733bf4e922675e37b91a8ee79afadb46f3edc"
+    },
+    "test_data.csv": {
+      "bytes": 35303060,
+      "sha256": "fc4110e979e7d569cb8aa819d450d29311e799115b2fe5b519b8a18eafa37323"
+    }
+  },
+  "known_selection_note": "ESA states train/test were not randomly sampled; test over-represents high-risk events and omits CDMs within 2 days of TCA.",
+  "test_labels": "Not present in the Kelvins test_data.csv downloaded here; Zenodo full archive download was blocked by HTTP 403 in this environment."
+}

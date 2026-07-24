@@ -1,0 +1,11 @@
+{
+  "status": "development OOF pilot, not confirmation",
+  "eligible_window_days": [
+    2,
+    7
+  ],
+  "danger_definition": "positive event has any SAFE-EXCLUDE in eligible trajectory",
+  "confidence_bound": "one-sided 95% exact Clopper-Pearson",
+  "threshold_relation": "SAFE-EXCLUDE when score <= threshold",
+  "comparison_note": "Thresholds optimized independently on development OOF; calibration/evaluation untouched."
+}

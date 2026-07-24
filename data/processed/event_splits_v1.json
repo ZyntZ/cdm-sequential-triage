@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "date": "2026-07-24",
+  "seed_stage1": 24072026,
+  "seed_stage2": 24072027,
+  "fractions": {
+    "development": 0.6,
+    "calibration": 0.2,
+    "evaluation": 0.2
+  },
+  "stratification": "binary final-risk label",
+  "unit": "event_id",
+  "evaluation_lock": "Do not inspect evaluation outcomes during model/policy selection.",
+  "mission_note": "Mission balance was not forced because several missions have 2–3 positives; leave-one-mission-out is a separate stress test."
+}
