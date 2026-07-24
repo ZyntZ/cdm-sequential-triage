@@ -4,7 +4,10 @@ import pandas as pd
 import numpy as np
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from prefix_features import build_prefix_features, eligible_prefixes
-from policy import cp_upper, event_policy_table, evaluate_threshold
+from policy import (
+    calibration_rank, calibrate_positive_threshold, cp_upper,
+    event_policy_table, evaluate_threshold,
+)
 
 
 def sample():
@@ -43,3 +46,29 @@ def test_policy_is_event_level_any_time():
 
 def test_cp_known_zero_failure_bound():
     assert abs(cp_upper(0,73)-0.0402067943)<1e-8
+
+
+
+def test_marginal_calibration_rank():
+    assert calibration_rank(73, 0.05, mode="marginal") == 3
+    assert calibration_rank(73, 0.10, mode="marginal") == 7
+
+
+def test_pac_calibration_rank():
+    assert calibration_rank(73, 0.05, mode="pac", confidence=0.95) == 1
+    assert calibration_rank(73, 0.10, mode="pac", confidence=0.95) == 3
+
+
+def test_calibrated_threshold_is_strict_with_ties():
+    scores = np.array([0.1, 0.1, 0.2, 0.3, 0.4])
+    result = calibrate_positive_threshold(scores, alpha=0.4, mode="marginal")
+    assert result["rank"] == 2
+    assert result["threshold"] < 0.1
+    assert np.sum(scores <= result["threshold"]) == 0
+
+
+def test_event_labels_must_be_constant():
+    x = sample().rename(columns={"risk": "score"})
+    x.loc[x.index[1], "y"] = 0
+    with np.testing.assert_raises(ValueError):
+        event_policy_table(x, "score")

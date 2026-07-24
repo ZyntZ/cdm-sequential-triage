@@ -1,0 +1,7 @@
+cff-version: 1.2.0
+title: Sequential CDM Triage
+message: "If you use this research code, please cite the repository and the ESA dataset."
+type: software
+version: 0.2.0
+date-released: 2026-07-24
+license: MIT

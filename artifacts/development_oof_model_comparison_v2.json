@@ -1,0 +1,35 @@
+{
+  "date": "2026-07-24",
+  "status": "development-only model comparison",
+  "models": [
+    "catboost_dynamic",
+    "logistic_snapshot",
+    "catboost_snapshot"
+  ],
+  "static_numeric_features": [
+    "time_to_tca",
+    "risk",
+    "max_risk_estimate",
+    "max_risk_scaling",
+    "miss_distance",
+    "relative_speed",
+    "mahalanobis_distance",
+    "t_position_covariance_det",
+    "c_position_covariance_det",
+    "t_obs_available",
+    "t_obs_used",
+    "t_weighted_rms",
+    "c_obs_available",
+    "c_obs_used",
+    "c_weighted_rms"
+  ],
+  "categorical_features": [
+    "mission_id",
+    "c_object_type"
+  ],
+  "fold_source": "development_oof_scores_v1.parquet",
+  "event_equal_weighting": true,
+  "calibration_accessed": false,
+  "evaluation_accessed": false,
+  "elapsed_seconds": 50.1
+}

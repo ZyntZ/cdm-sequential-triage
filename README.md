@@ -1,10 +1,37 @@
 # Sequential CDM Triage
 
-Research prototype for event-level risk-controlled triage of ESA conjunction data messages.
+Event-level risk-controlled triage for conjunction data message streams.
 
-Status: data audit and pilot baseline. Not for operational use or maneuver decisions.
+## Research question
+Can a sequential policy reduce manual review of low-final-risk conjunction events while controlling the probability that a high-final-calculated-risk event is ever assigned `SAFE-EXCLUDE` during the 2–7 day decision window?
 
-## Reproduce
-- Raw files and checksums: `data/manifest.json`
+## Status
+Development-only research prototype. Calibration and evaluation partitions remain untouched. Not for operational collision avoidance or maneuver decisions.
+
+## Decisions
+- `SAFE-EXCLUDE`: no current manual review; routine automated ingestion continues.
+- `MONITOR`: priority automated watchlist; reassess at every new CDM.
+- `ESCALATE`: manual analysis required.
+
+## Current evidence
+Current risk, logistic snapshot, CatBoost snapshot, and CatBoost dynamic scores were compared on identical event-level out-of-fold splits. CatBoost snapshot currently leads at the strict end of the development frontier.
+
+The policy module supports two event-level calibration statements:
+- marginal rank calibration for average risk over the random calibration sample;
+- PAC rank calibration with an explicit confidence level over the calibration sample.
+
+Development results are in `reports/DEVELOPMENT_REPORT_002_RU.md` and `reports/DEVELOPMENT_NOTES_CALIBRATION.md`.
+
+## Reproducibility
+- Dataset source/checksums: `data/manifest.json`
 - Statistical protocol: `PROTOCOL.md`
-- Pilot artifacts: `reports/`
+- Causal feature builder: `src/prefix_features.py`
+- Event-level policy and calibration utilities: `src/policy.py`
+- Calibration diagnostics: `python scripts/calibration_diagnostics.py --output reports/calibration.csv`
+- Tests: `pytest -q`
+
+## Data
+ESA Collision Avoidance Challenge, DOI: 10.5281/zenodo.4463683, CC BY 4.0. Raw data are not redistributed in this repository.
+
+## Limitations
+The target is high final calculated collision risk, not collision occurrence. Statistical control relies on event-level exchangeability with calibration data and does not constitute an operational safety guarantee under arbitrary distribution shift.

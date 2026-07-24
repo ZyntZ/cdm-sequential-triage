@@ -1,0 +1,12 @@
+{
+  "repository_name": "cdm-sequential-triage",
+  "display_name": "Sequential CDM Triage",
+  "tagline": "Event-level risk-controlled triage for conjunction data message streams",
+  "chosen_on": "2026-07-24",
+  "alternatives": [
+    "cdm-anytime-triage",
+    "conjunction-risk-triage",
+    "orbit-triage"
+  ],
+  "reason": "Descriptive, technically accurate, searchable, and does not overclaim safety or collision prevention."
+}

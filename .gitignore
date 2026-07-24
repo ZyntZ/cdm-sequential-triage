@@ -1,0 +1,6 @@
+data/raw/
+*.zip
+*.csv~
+__pycache__/
+.pytest_cache/
+.venv/
