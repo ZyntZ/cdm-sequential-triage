@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from prefix_features import build_prefix_features, eligible_prefixes
 from robustness import subgroup_metrics
 from shift_gate import ConformalShiftGate
+from triage import Decision, SequentialTriagePolicy
 from policy import (
     calibration_rank, calibrate_positive_threshold, cp_upper,
     event_policy_table, evaluate_threshold, history_gated_event_table,
@@ -175,3 +176,62 @@ def test_shift_gate_requires_independent_finite_calibration_features():
     gate = ConformalShiftGate(["risk"]).fit(pd.DataFrame({"risk": [-9.0, -8.0, -7.0]}))
     with np.testing.assert_raises(ValueError):
         gate.calibrate(pd.DataFrame({"risk": [-8.0, np.nan]}), alpha=0.10)
+
+
+def test_eligible_prefixes_include_window_boundaries():
+    features = build_prefix_features(sample())
+    selected = eligible_prefixes(features, min_days=3.0, max_days=5.0)
+    assert selected["time_to_tca"].between(3.0, 5.0).all()
+    assert {3.0, 5.0}.issubset(set(selected["time_to_tca"]))
+
+
+def test_delta_previous_follows_causal_ingestion_order():
+    features = build_prefix_features(sample()).query("event_id == 1")
+    assert np.isnan(features.iloc[0]["risk_delta_prev"])
+    assert features.iloc[1]["risk_delta_prev"] == 1.0
+    assert features.iloc[2]["risk_delta_prev"] == 2.0
+    assert features["dt_prev"].iloc[1:].tolist() == [1.0, 1.0]
+
+
+def test_sequential_triage_history_gate_shift_gate_and_audit():
+    proper = pd.DataFrame({"risk": [-9.0, -8.5, -8.0, -7.5, -7.0]})
+    calibration = pd.DataFrame({"risk": np.linspace(-9.0, -7.0, 39)})
+    gate = ConformalShiftGate(["risk"]).fit(proper)
+    gate.calibrate(calibration, alpha=0.10)
+    policy = SequentialTriagePolicy(
+        safe_threshold=0.20,
+        minimum_history=3,
+        escalation_threshold=0.80,
+        shift_gate=gate,
+    )
+
+    first = policy.update(1, 6.0, 0.10, {"risk": -8.0})
+    second = policy.update(1, 5.0, 0.90, {"risk": -8.0})
+    third = policy.update(1, 4.0, 0.10, {"risk": 20.0})
+    fourth = policy.update(1, 3.0, 0.10, {"risk": -8.0})
+
+    assert [first.decision, second.decision, third.decision, fourth.decision] == [
+        Decision.MONITOR, Decision.ESCALATE, Decision.MONITOR, Decision.SAFE_EXCLUDE
+    ]
+    assert third.reason == "safe_exclude_blocked_by_shift_gate"
+    audit = policy.audit_log()
+    assert audit["sequence_number"].tolist() == [1, 2, 3, 4]
+    assert audit.iloc[-1]["decision"] == "SAFE-EXCLUDE"
+
+
+def test_sequential_triage_escalates_and_rejects_out_of_order_updates():
+    policy = SequentialTriagePolicy(0.20, escalation_threshold=0.80)
+    result = policy.update("event", 5.0, 0.90)
+    assert result.decision == Decision.ESCALATE
+    with np.testing.assert_raises(ValueError):
+        policy.update("event", 5.5, 0.10)
+    assert len(policy.audit_log()) == 1
+
+
+def test_missing_shift_features_fail_safe():
+    gate = ConformalShiftGate(["risk"]).fit(pd.DataFrame({"risk": [-9.0, -8.0, -7.0]}))
+    gate.calibrate(pd.DataFrame({"risk": np.linspace(-9.0, -7.0, 39)}), alpha=0.10)
+    policy = SequentialTriagePolicy(0.20, shift_gate=gate)
+    result = policy.update(1, 5.0, 0.10)
+    assert result.decision == Decision.MONITOR
+    assert result.reason == "safe_exclude_blocked_by_shift_gate"

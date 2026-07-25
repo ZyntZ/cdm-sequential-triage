@@ -26,12 +26,15 @@ Subgroup diagnostics cover mission, history length, and entry-message completene
 
 A split-conformal applicability gate is implemented for numeric event features. It blocks `SAFE-EXCLUDE` on non-finite inputs and on events outside the calibrated robust-deviation region. Its false-flag statement is marginal and requires event-level exchangeability; it is not a guarantee under arbitrary distribution shift.
 
+The runtime policy now combines the calibrated lower threshold, minimum-history rule, and applicability gate into the three operational decisions. Every accepted update is recorded with its sequence number, score, gate result, decision, and reason; out-of-order event updates are rejected. The `ESCALATE` threshold is an operational prioritisation setting and is not covered by the dangerous-exclusion guarantee.
+
 ## Reproducibility
 - Dataset source/checksums: `data/manifest.json`
 - Statistical protocol: `PROTOCOL.md`
 - Causal feature builder: `src/prefix_features.py`
 - Event-level policy and calibration utilities: `src/policy.py`
 - Conformal applicability gate: `src/shift_gate.py`
+- Stateful three-decision policy and audit log: `src/triage.py`
 - Calibration diagnostics: `python scripts/calibration_diagnostics.py --output reports/calibration.csv`
 - Subgroup diagnostics: `python scripts/robustness_diagnostics.py --group mission_id --output reports/mission.csv`
 - Tests: `pytest -q`
