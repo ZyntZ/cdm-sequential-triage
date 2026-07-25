@@ -1,0 +1,5 @@
+grouping,outcome,chi2,df,p_value,min_expected
+history_group,danger among positives,2.1587523006877847,2,0.3398074482938911,2.3125
+history_group,SAFE-EXCLUDE among negatives,473.41120247346544,2,1.58512511584261e-103,425.7865976416451
+missingness_group,danger among positives,0.8814494147827481,2,0.6435698522118434,1.6875
+missingness_group,SAFE-EXCLUDE among negatives,33.08417472963287,2,6.54429304580463e-08,232.2962323842393

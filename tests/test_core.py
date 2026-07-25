@@ -4,9 +4,10 @@ import pandas as pd
 import numpy as np
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from prefix_features import build_prefix_features, eligible_prefixes
+from robustness import subgroup_metrics
 from policy import (
     calibration_rank, calibrate_positive_threshold, cp_upper,
-    event_policy_table, evaluate_threshold,
+    event_policy_table, evaluate_threshold, history_gated_event_table,
 )
 
 
@@ -72,3 +73,68 @@ def test_event_labels_must_be_constant():
     x.loc[x.index[1], "y"] = 0
     with np.testing.assert_raises(ValueError):
         event_policy_table(x, "score")
+
+
+
+def test_subgroup_metrics_keep_unsupported_bounds_missing():
+    events = pd.DataFrame({
+        "event_id": [1, 2, 3, 4],
+        "y": [1, 0, 0, 0],
+        "group": ["a", "a", "b", "b"],
+        "safe_exclude": [False, True, True, False],
+    })
+    result = subgroup_metrics(events, "group").set_index("group")
+    assert result.loc["a", "danger_rate"] == 0.0
+    assert result.loc["a", "safe_negative_rate"] == 1.0
+    assert np.isnan(result.loc["b", "danger_rate"])
+    assert np.isnan(result.loc["b", "danger_ucb"])
+
+
+def test_subgroup_metrics_require_event_level_rows():
+    events = pd.DataFrame({
+        "event_id": [1, 1],
+        "y": [1, 1],
+        "group": ["a", "a"],
+        "safe_exclude": [False, True],
+    })
+    with np.testing.assert_raises(ValueError):
+        subgroup_metrics(events, "group")
+
+
+
+def test_calibration_retains_infinite_scores():
+    scores = np.array([0.1, 0.2, np.inf])
+    result = calibrate_positive_threshold(scores, alpha=0.5, mode="marginal")
+    assert result["n_positive"] == 3
+    assert result["rank"] == 2
+
+
+def test_calibration_rejects_nan_scores():
+    scores = np.array([0.1, np.nan, 0.2])
+    with np.testing.assert_raises(ValueError):
+        calibrate_positive_threshold(scores, alpha=0.5, mode="marginal")
+
+
+
+def test_history_gate_keeps_ineligible_events():
+    prefixes = pd.DataFrame({
+        "event_id": [1, 1, 2],
+        "y": [1, 1, 0],
+        "time_to_tca": [5.0, 4.0, 5.0],
+        "score": [0.4, 0.2, 0.1],
+        "n_cdm_so_far": [1, 2, 1],
+    })
+    events = history_gated_event_table(prefixes, "score", minimum_history=2)
+    events = events.set_index("event_id")
+    assert events.loc[1, "min_score"] == 0.2
+    assert np.isinf(events.loc[2, "min_score"])
+    assert len(events) == 2
+
+
+def test_history_gate_rejects_invalid_minimum():
+    prefixes = pd.DataFrame({
+        "event_id": [1], "y": [1], "time_to_tca": [5.0],
+        "score": [0.2], "n_cdm_so_far": [1],
+    })
+    with np.testing.assert_raises(ValueError):
+        history_gated_event_table(prefixes, "score", minimum_history=0)

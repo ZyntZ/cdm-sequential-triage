@@ -20,7 +20,9 @@ The policy module supports two event-level calibration statements:
 - marginal rank calibration for average risk over the random calibration sample;
 - PAC rank calibration with an explicit confidence level over the calibration sample.
 
-Development results are in `reports/DEVELOPMENT_REPORT_002_RU.md` and `reports/DEVELOPMENT_NOTES_CALIBRATION.md`.
+Development results are in `reports/DEVELOPMENT_REPORT_002_RU.md`, `reports/DEVELOPMENT_NOTES_CALIBRATION.md`, and `reports/DEVELOPMENT_NOTES_ROBUSTNESS.md`.
+
+Subgroup diagnostics cover mission, history length, and entry-message completeness. A three-CDM minimum-history gate remains a development candidate; it has not been frozen or evaluated on the calibration partition.
 
 ## Reproducibility
 - Dataset source/checksums: `data/manifest.json`
@@ -28,6 +30,7 @@ Development results are in `reports/DEVELOPMENT_REPORT_002_RU.md` and `reports/D
 - Causal feature builder: `src/prefix_features.py`
 - Event-level policy and calibration utilities: `src/policy.py`
 - Calibration diagnostics: `python scripts/calibration_diagnostics.py --output reports/calibration.csv`
+- Subgroup diagnostics: `python scripts/robustness_diagnostics.py --group mission_id --output reports/mission.csv`
 - Tests: `pytest -q`
 
 ## Data

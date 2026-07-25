@@ -29,6 +29,38 @@ def event_policy_table(prefix_scores: pd.DataFrame, score_col: str) -> pd.DataFr
     )
 
 
+
+def history_gated_event_table(
+    prefix_scores: pd.DataFrame,
+    score_col: str,
+    minimum_history: int,
+    history_col: str = "n_cdm_so_far",
+) -> pd.DataFrame:
+    """Aggregate scores after a minimum-history gate without dropping events.
+
+    Events with no eligible prefix receive ``min_score = +inf`` and therefore
+    cannot be assigned SAFE-EXCLUDE by a finite lower-tail threshold. Keeping
+    these events is required for an event-level calibration denominator.
+    """
+    if minimum_history < 1:
+        raise ValueError("minimum_history must be at least one")
+    required = {"event_id", "y", score_col, "time_to_tca", history_col}
+    missing = required.difference(prefix_scores.columns)
+    if missing:
+        raise ValueError(f"Missing required columns: {sorted(missing)}")
+    labels = prefix_scores.groupby("event_id", as_index=False).agg(y=("y", "first"))
+    eligible = prefix_scores.loc[prefix_scores[history_col] >= minimum_history]
+    if eligible.empty:
+        result = labels.copy()
+        result["min_score"] = np.inf
+        result["first_available_tca"] = np.nan
+        result["last_available_tca"] = np.nan
+        return result
+    aggregated = event_policy_table(eligible, score_col)
+    result = labels.merge(aggregated, on=["event_id", "y"], how="left", validate="one_to_one")
+    result["min_score"] = result["min_score"].fillna(np.inf)
+    return result
+
 def evaluate_threshold(events: pd.DataFrame, threshold: float, confidence: float = 0.95) -> dict:
     safe = events["min_score"] <= threshold
     pos = events["y"] == 1
@@ -89,9 +121,10 @@ def calibrate_positive_threshold(
     which makes the rank rule strict and conservative in the presence of ties.
     """
     scores = np.asarray(positive_event_scores, dtype=float)
-    scores = scores[np.isfinite(scores)]
     if scores.size == 0:
-        raise ValueError("At least one finite positive-event score is required")
+        raise ValueError("At least one positive-event score is required")
+    if np.isnan(scores).any():
+        raise ValueError("Positive-event scores must not contain NaN")
     rank = calibration_rank(scores.size, alpha, mode, confidence)
     if rank == 0:
         threshold = -np.inf
