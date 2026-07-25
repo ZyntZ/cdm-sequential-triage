@@ -24,11 +24,14 @@ Development results are in `reports/DEVELOPMENT_REPORT_002_RU.md`, `reports/DEVE
 
 Subgroup diagnostics cover mission, history length, and entry-message completeness. A three-CDM minimum-history gate remains a development candidate; it has not been frozen or evaluated on the calibration partition.
 
+A split-conformal applicability gate is implemented for numeric event features. It blocks `SAFE-EXCLUDE` on non-finite inputs and on events outside the calibrated robust-deviation region. Its false-flag statement is marginal and requires event-level exchangeability; it is not a guarantee under arbitrary distribution shift.
+
 ## Reproducibility
 - Dataset source/checksums: `data/manifest.json`
 - Statistical protocol: `PROTOCOL.md`
 - Causal feature builder: `src/prefix_features.py`
 - Event-level policy and calibration utilities: `src/policy.py`
+- Conformal applicability gate: `src/shift_gate.py`
 - Calibration diagnostics: `python scripts/calibration_diagnostics.py --output reports/calibration.csv`
 - Subgroup diagnostics: `python scripts/robustness_diagnostics.py --group mission_id --output reports/mission.csv`
 - Tests: `pytest -q`

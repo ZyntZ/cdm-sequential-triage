@@ -5,6 +5,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from prefix_features import build_prefix_features, eligible_prefixes
 from robustness import subgroup_metrics
+from shift_gate import ConformalShiftGate
 from policy import (
     calibration_rank, calibrate_positive_threshold, cp_upper,
     event_policy_table, evaluate_threshold, history_gated_event_table,
@@ -138,3 +139,39 @@ def test_history_gate_rejects_invalid_minimum():
     })
     with np.testing.assert_raises(ValueError):
         history_gated_event_table(prefixes, "score", minimum_history=0)
+
+
+def test_shift_gate_calibration_and_blocking():
+    proper = pd.DataFrame({
+        "risk": [-9.0, -8.5, -8.0, -7.5, -7.0],
+        "miss_distance": [100.0, 110.0, 90.0, 105.0, 95.0],
+    })
+    calibration = pd.DataFrame({
+        "risk": np.linspace(-9.0, -7.0, 39),
+        "miss_distance": np.linspace(90.0, 110.0, 39),
+    })
+    gate = ConformalShiftGate(["risk", "miss_distance"]).fit(proper)
+    result = gate.calibrate(calibration, alpha=0.10)
+    decisions = gate.allows_safe_exclude(pd.DataFrame({
+        "risk": [-8.0, 20.0, np.nan],
+        "miss_distance": [100.0, 100.0, 100.0],
+    }))
+    assert result.rank == 36
+    assert result.marginal_flag_bound <= 0.10
+    assert decisions.tolist() == [True, False, False]
+
+
+def test_shift_gate_small_calibration_is_conservative():
+    proper = pd.DataFrame({"risk": [-9.0, -8.0, -7.0]})
+    calibration = pd.DataFrame({"risk": [-8.5, -8.0, -7.5]})
+    gate = ConformalShiftGate(["risk"]).fit(proper)
+    result = gate.calibrate(calibration, alpha=0.05)
+    assert np.isinf(result.threshold)
+    assert gate.allows_safe_exclude(pd.DataFrame({"risk": [1000.0]})).item()
+    assert not gate.allows_safe_exclude(pd.DataFrame({"risk": [np.inf]})).item()
+
+
+def test_shift_gate_requires_independent_finite_calibration_features():
+    gate = ConformalShiftGate(["risk"]).fit(pd.DataFrame({"risk": [-9.0, -8.0, -7.0]}))
+    with np.testing.assert_raises(ValueError):
+        gate.calibrate(pd.DataFrame({"risk": [-8.0, np.nan]}), alpha=0.10)
