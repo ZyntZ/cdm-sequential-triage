@@ -36,15 +36,57 @@ def event_id_digest(event_ids: pd.Series) -> str:
     return hashlib.sha256("\n".join(values).encode("utf-8")).hexdigest()
 
 
-def prepare_prefix_scores(frame: pd.DataFrame) -> pd.DataFrame:
-    score_column = POLICY["score_column"]
+REQUIRED_POLICY_KEYS = {
+    "score_column", "alpha", "confidence", "calibration_mode",
+    "minimum_history", "min_days_to_tca", "max_days_to_tca",
+}
+
+
+def validate_policy(policy: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(policy, dict) or set(policy) != REQUIRED_POLICY_KEYS:
+        raise ValueError("Policy fields do not match the confirmation schema")
+    result = dict(policy)
+    if not isinstance(result["score_column"], str) or not result["score_column"]:
+        raise ValueError("score_column must be a non-empty string")
+    if result["calibration_mode"] not in {"marginal", "pac"}:
+        raise ValueError("Unsupported calibration_mode")
+    if not 0 < float(result["alpha"]) < 1 or not 0 < float(result["confidence"]) < 1:
+        raise ValueError("alpha and confidence must lie in (0, 1)")
+    if int(result["minimum_history"]) < 1:
+        raise ValueError("minimum_history must be at least one")
+    if not 0 <= float(result["min_days_to_tca"]) < float(result["max_days_to_tca"]):
+        raise ValueError("Invalid decision window")
+    return result
+
+
+def policy_from_model_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    candidate = manifest.get("candidate", {})
+    window = candidate.get("decision_window_days", [])
+    if len(window) != 2:
+        raise ValueError("Model manifest has no valid decision window")
+    return validate_policy({
+        "score_column": manifest.get("score_column"),
+        "alpha": candidate.get("alpha"),
+        "confidence": candidate.get("calibration_confidence"),
+        "calibration_mode": candidate.get("calibration_mode"),
+        "minimum_history": candidate.get("minimum_history"),
+        "min_days_to_tca": window[0],
+        "max_days_to_tca": window[1],
+    })
+
+
+def prepare_prefix_scores(
+    frame: pd.DataFrame, policy: dict[str, Any] | None = None
+) -> pd.DataFrame:
+    policy = POLICY if policy is None else policy
+    score_column = policy["score_column"]
     required = {"event_id", "time_to_tca", "y", score_column, "model_sha256"}
     missing = required.difference(frame.columns)
     if missing:
         raise ValueError(f"Missing required columns: {sorted(missing)}")
     selected = frame.loc[
         frame["time_to_tca"].between(
-            POLICY["min_days_to_tca"], POLICY["max_days_to_tca"], inclusive="both"
+            policy["min_days_to_tca"], policy["max_days_to_tca"], inclusive="both"
         )
     ].copy()
     if selected.empty:
@@ -103,29 +145,43 @@ def calibrate(
     calibration_prefixes: pd.DataFrame,
     calibration_labels: pd.DataFrame | None = None,
     shift_gate: ConformalShiftGate | None = None,
+    policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    prepared = prepare_prefix_scores(calibration_prefixes)
+    policy = POLICY.copy() if policy is None else validate_policy(policy)
+    if calibration_labels is None:
+        prepared_input = calibration_prefixes
+    else:
+        labels = validate_event_labels(calibration_labels)
+        scored_ids = set(calibration_prefixes["event_id"].astype(str).unique())
+        label_ids = set(labels["event_id"].astype(str).unique())
+        if not scored_ids.issubset(label_ids):
+            raise ValueError("Calibration scores contain event_id values without labels")
+        score_frame = calibration_prefixes.drop(columns="y", errors="ignore")
+        prepared_input = score_frame.merge(
+            labels, on="event_id", how="left", validate="many_to_one"
+        )
+    prepared = prepare_prefix_scores(prepared_input, policy)
     if shift_gate is None:
         scored_events = history_gated_event_table(
             prepared,
-            POLICY["score_column"],
-            minimum_history=POLICY["minimum_history"],
+            policy["score_column"],
+            minimum_history=policy["minimum_history"],
         )
     else:
         decisions = first_safe_decision_table(
             prepared,
-            POLICY["score_column"],
+            policy["score_column"],
             threshold=float("inf"),
-            minimum_history=POLICY["minimum_history"],
+            minimum_history=policy["minimum_history"],
             shift_gate=shift_gate,
         )
         scored_events = decisions.loc[:, ["event_id", "y"]].copy()
         permitted = prepared.loc[
-            prepared["eligible_history_count"] >= POLICY["minimum_history"]
+            prepared["eligible_history_count"] >= policy["minimum_history"]
         ].copy()
         permitted = permitted.loc[shift_gate.allows_safe_exclude(permitted)]
         minima = permitted.groupby("event_id", as_index=False).agg(
-            min_score=(POLICY["score_column"], "min")
+            min_score=(policy["score_column"], "min")
         )
         scored_events = scored_events.merge(
             minima, on="event_id", how="left", validate="one_to_one"
@@ -134,11 +190,6 @@ def calibrate(
     if calibration_labels is None:
         labels = scored_events.loc[:, ["event_id", "y"]]
     else:
-        labels = validate_event_labels(calibration_labels)
-        scored_ids = set(scored_events["event_id"].astype(str))
-        label_ids = set(labels["event_id"].astype(str))
-        if not scored_ids.issubset(label_ids):
-            raise ValueError("Calibration scores contain event_id values without labels")
         scored_events = scored_events.drop(columns="y")
         scored_events = labels.merge(
             scored_events, on="event_id", how="left", validate="one_to_one"
@@ -147,14 +198,14 @@ def calibrate(
     positives = scored_events.loc[scored_events["y"] == 1, "min_score"]
     rule = calibrate_positive_threshold(
         positives,
-        alpha=POLICY["alpha"],
-        mode=POLICY["calibration_mode"],
-        confidence=POLICY["confidence"],
+        alpha=policy["alpha"],
+        mode=policy["calibration_mode"],
+        confidence=policy["confidence"],
     )
     if rule["rank"] == 0:
         raise ValueError("Too few positive calibration events for the frozen PAC level")
     return {
-        "policy": POLICY.copy(),
+        "policy": policy.copy(),
         "calibration": rule,
         "calibration_events": int(scored_events.shape[0]),
         "calibration_event_ids": sorted(str(value) for value in labels["event_id"]),
@@ -168,9 +219,13 @@ def evaluate(
     calibration_artifact: dict[str, Any],
     evaluation_labels: pd.DataFrame | None = None,
     shift_gate: ConformalShiftGate | None = None,
+    policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if calibration_artifact.get("policy") != POLICY:
+    artifact_policy = validate_policy(calibration_artifact.get("policy"))
+    expected_policy = POLICY if policy is None else validate_policy(policy)
+    if artifact_policy != expected_policy:
         raise ValueError("Calibration artifact does not match the frozen policy")
+    policy = artifact_policy
     threshold = calibration_artifact.get("calibration", {}).get("threshold")
     if threshold is None:
         raise ValueError("Calibration artifact has no threshold")
@@ -178,7 +233,7 @@ def evaluate(
     supplied_gate_hash = None if shift_gate is None else shift_gate.fingerprint()
     if expected_gate_hash != supplied_gate_hash:
         raise ValueError("Calibration artifact and supplied shift gate do not match")
-    prepared = prepare_prefix_scores(evaluation_prefixes)
+    prepared = prepare_prefix_scores(evaluation_prefixes, policy)
     evaluation_model_sha256 = str(prepared["model_sha256"].iloc[0])
     if calibration_artifact.get("model_sha256") != evaluation_model_sha256:
         raise ValueError("Calibration and evaluation scores use different models")
@@ -199,9 +254,9 @@ def evaluate(
         )
     decisions = first_safe_decision_table(
         prepared,
-        POLICY["score_column"],
+        policy["score_column"],
         float(threshold),
-        POLICY["minimum_history"],
+        policy["minimum_history"],
         shift_gate=shift_gate,
     ).drop(columns="y")
     events = labels.merge(decisions, on="event_id", how="left", validate="one_to_one")
@@ -215,11 +270,11 @@ def evaluate(
     first_safe = events.loc[safe_negative, "first_safe_tca"]
     metrics = {
         "threshold": float(threshold),
-        "minimum_history": POLICY["minimum_history"],
+        "minimum_history": policy["minimum_history"],
         "danger_k": danger_k,
         "danger_n": danger_n,
         "danger_rate": danger_k / danger_n,
-        "danger_ucb": cp_upper(danger_k, danger_n, POLICY["confidence"]),
+        "danger_ucb": cp_upper(danger_k, danger_n, policy["confidence"]),
         "safe_negative": int(safe_negative.sum()),
         "negative_n": negative_n,
         "safe_negative_rate": float(safe_negative.sum() / negative_n),
@@ -233,7 +288,7 @@ def evaluate(
         "median_first_safe_tca": None if first_safe.empty else float(first_safe.median()),
     }
     return {
-        "policy": POLICY.copy(),
+        "policy": policy.copy(),
         "evaluation": metrics,
         "evaluation_events": int(labels.shape[0]),
         "evaluation_event_ids_sha256": event_id_digest(labels["event_id"]),

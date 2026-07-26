@@ -19,17 +19,22 @@ DYNAMIC_NUMERIC_FEATURES = tuple(dict.fromkeys(NUMERIC_FEATURES + PREFIX_FEATURE
 DYNAMIC_FEATURES = DYNAMIC_NUMERIC_FEATURES + CATEGORICAL_FEATURES
 
 
-def prepare_dynamic_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    """Build causal, window-local prefix features for model training."""
+def prepare_dynamic_frame(
+    frame: pd.DataFrame, require_labels: bool = True
+) -> pd.DataFrame:
+    """Build causal, window-local prefix features for training or scoring."""
     featured = eligible_prefixes(build_prefix_features(frame))
-    required = {"event_id", "time_to_tca", "y", *DYNAMIC_FEATURES}
+    required = {"event_id", "time_to_tca", *DYNAMIC_FEATURES}
+    if require_labels:
+        required.add("y")
     missing = required.difference(featured.columns)
     if missing:
         raise ValueError(f"Missing required columns: {sorted(missing)}")
-    if not featured["y"].isin([0, 1]).all():
-        raise ValueError("y must contain only 0 and 1")
-    if (featured.groupby("event_id")["y"].nunique() != 1).any():
-        raise ValueError("Each event_id must have one event-level label")
+    if require_labels:
+        if not featured["y"].isin([0, 1]).all():
+            raise ValueError("y must contain only 0 and 1")
+        if (featured.groupby("event_id")["y"].nunique() != 1).any():
+            raise ValueError("Each event_id must have one event-level label")
     for column in DYNAMIC_NUMERIC_FEATURES:
         featured[column] = pd.to_numeric(featured[column], errors="coerce")
         if np.isinf(featured[column].to_numpy(dtype=float)).any():
@@ -113,3 +118,18 @@ def score_dynamic_model(model: CatBoostClassifier, prepared: pd.DataFrame) -> np
     if not np.isfinite(scores).all():
         raise ValueError("Model produced non-finite scores")
     return scores
+
+
+def score_dynamic_frame(
+    model: CatBoostClassifier,
+    frame: pd.DataFrame,
+    score_column: str = "catboost_tail_aligned",
+) -> pd.DataFrame:
+    """Score raw, label-blind CDM histories with causal dynamic features."""
+    if "y" in frame.columns:
+        raise ValueError("Scoring input must be label-blind; provide labels separately")
+    prepared = prepare_dynamic_frame(frame, require_labels=False)
+    scores = score_dynamic_model(model, prepared)
+    return prepared.loc[:, [
+        "event_id", "time_to_tca", "eligible_history_count"
+    ]].assign(**{score_column: scores})

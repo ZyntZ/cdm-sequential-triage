@@ -9,7 +9,9 @@ from history_gate_diagnostics import (
     attach_gate_features, crossfit_shift_gate, nested_gate_roles,
 )
 from event_aligned_diagnostics import attach_event_folds
-from event_aligned_model import positive_tail_weights, prepare_dynamic_frame
+from event_aligned_model import (
+    fit_dynamic_model, positive_tail_weights, prepare_dynamic_frame, score_dynamic_frame,
+)
 from event_aligned_robustness import (
     attach_candidate_scores, event_groups, paired_subgroup_table,
 )
@@ -30,7 +32,7 @@ from shift_gate import ConformalShiftGate
 from triage import Decision, SequentialTriagePolicy
 from confirmation import (
     POLICY, acquire_confirmation_lock, attach_event_labels, calibrate, evaluate,
-    prepare_prefix_scores,
+    policy_from_model_manifest, prepare_prefix_scores,
 )
 from snapshot_model import (
     assert_disjoint_splits, event_equal_weights, fit_snapshot_model,
@@ -987,3 +989,65 @@ def test_complete_rosters_keep_events_without_eligible_prefixes():
     assert result["evaluation_events"] == 43
     assert result["evaluation"]["negative_n"] == 3
 
+
+
+def tail_manifest():
+    return {
+        "score_column": "catboost_tail_aligned",
+        "candidate": {
+            "alpha": 0.10,
+            "calibration_confidence": 0.95,
+            "calibration_mode": "pac",
+            "minimum_history": 3,
+            "decision_window_days": [2.0, 7.0],
+        },
+    }
+
+
+def test_dynamic_scoring_is_label_blind_and_returns_confirmation_columns():
+    training = snapshot_training_frame()
+    prepared = prepare_dynamic_frame(training)
+    model = fit_dynamic_model(prepared, event_equal_weights(prepared), {"iterations": 10})
+    features = snapshot_training_frame(100).drop(columns="y")
+    scores = score_dynamic_frame(model, features)
+    assert scores.columns.tolist() == [
+        "event_id", "time_to_tca", "eligible_history_count",
+        "catboost_tail_aligned",
+    ]
+    assert scores["catboost_tail_aligned"].between(0.0, 1.0).all()
+    with np.testing.assert_raises(ValueError):
+        score_dynamic_frame(model, snapshot_training_frame(100))
+
+
+def test_tail_policy_is_loaded_from_model_manifest():
+    policy = policy_from_model_manifest(tail_manifest())
+    assert policy["score_column"] == "catboost_tail_aligned"
+    assert policy["minimum_history"] == 3
+    assert policy["min_days_to_tca"] == 2.0
+    assert policy["max_days_to_tca"] == 7.0
+
+
+def test_label_blind_tail_scores_can_be_calibrated_with_separate_labels():
+    policy = policy_from_model_manifest(tail_manifest())
+    scores = confirmation_scores().rename(
+        columns={"catboost_snapshot": "catboost_tail_aligned"}
+    ).drop(columns="y")
+    labels = confirmation_scores().loc[:, ["event_id", "y"]].drop_duplicates()
+    calibration = calibrate(scores, labels, policy=policy)
+    assert calibration["policy"] == policy
+    assert calibration["calibration"]["n_positive"] == 40
+
+
+def test_tail_confirmation_requires_the_same_frozen_policy():
+    policy = policy_from_model_manifest(tail_manifest())
+    calibration_scores = confirmation_scores().rename(
+        columns={"catboost_snapshot": "catboost_tail_aligned"}
+    )
+    calibration = calibrate(calibration_scores, policy=policy)
+    evaluation_scores = confirmation_scores(event_offset=100).rename(
+        columns={"catboost_snapshot": "catboost_tail_aligned"}
+    )
+    result = evaluate(evaluation_scores, calibration, policy=policy)
+    assert result["policy"]["score_column"] == "catboost_tail_aligned"
+    with np.testing.assert_raises(ValueError):
+        evaluate(evaluation_scores, calibration)

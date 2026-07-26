@@ -17,6 +17,7 @@ from confirmation import (
     calibrate,
     evaluate,
     file_sha256,
+    policy_from_model_manifest,
     read_json,
     write_json,
 )
@@ -27,7 +28,12 @@ def calibration_command(args: argparse.Namespace) -> None:
     prefixes = pd.read_parquet(args.scores)
     labels = pd.read_parquet(args.labels)
     shift_gate = None if args.gate is None else ConformalShiftGate.load(args.gate)
-    artifact = calibrate(prefixes, labels, shift_gate=shift_gate)
+    manifest = None if args.model_manifest is None else read_json(args.model_manifest)
+    policy = None if manifest is None else policy_from_model_manifest(manifest)
+    artifact = calibrate(prefixes, labels, shift_gate=shift_gate, policy=policy)
+    artifact["model_manifest_sha256"] = (
+        None if args.model_manifest is None else file_sha256(args.model_manifest)
+    )
     artifact["calibration_scores_sha256"] = file_sha256(args.scores)
     artifact["calibration_labels_sha256"] = file_sha256(args.labels)
     artifact["shift_gate_file_sha256"] = (
@@ -60,6 +66,12 @@ def confirmation_command(args: argparse.Namespace) -> None:
         "shift_gate_file_sha256": (
             None if args.gate is None else file_sha256(args.gate)
         ),
+        "model_manifest": (
+            None if args.model_manifest is None else str(args.model_manifest)
+        ),
+        "model_manifest_sha256": (
+            None if args.model_manifest is None else file_sha256(args.model_manifest)
+        ),
     }
     acquire_confirmation_lock(args.lock, lock_payload)
     prefix_scores = pd.read_parquet(args.scores)
@@ -69,7 +81,17 @@ def confirmation_command(args: argparse.Namespace) -> None:
         event_labels.loc[event_labels["event_id"].isin(prefix_scores["event_id"].unique())],
     )
     shift_gate = None if args.gate is None else ConformalShiftGate.load(args.gate)
-    result = evaluate(prefixes, artifact, event_labels, shift_gate=shift_gate)
+    manifest = None if args.model_manifest is None else read_json(args.model_manifest)
+    policy = None if manifest is None else policy_from_model_manifest(manifest)
+    expected_manifest_hash = artifact.get("model_manifest_sha256")
+    supplied_manifest_hash = (
+        None if args.model_manifest is None else file_sha256(args.model_manifest)
+    )
+    if expected_manifest_hash != supplied_manifest_hash:
+        raise ValueError("Calibration artifact and supplied model manifest do not match")
+    result = evaluate(
+        prefixes, artifact, event_labels, shift_gate=shift_gate, policy=policy
+    )
     result.update(lock_payload)
     result["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
     write_json(args.output, result)
@@ -91,6 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
     calibration.add_argument("--labels", type=Path, required=True)
     calibration.add_argument("--output", type=Path, required=True)
     calibration.add_argument("--gate", type=Path)
+    calibration.add_argument("--model-manifest", type=Path)
     calibration.set_defaults(handler=calibration_command)
 
     confirmation = commands.add_parser("confirm")
@@ -100,6 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
     confirmation.add_argument("--output", type=Path, required=True)
     confirmation.add_argument("--lock", type=Path, required=True)
     confirmation.add_argument("--gate", type=Path)
+    confirmation.add_argument("--model-manifest", type=Path)
     confirmation.set_defaults(handler=confirmation_command)
     return parser
 
