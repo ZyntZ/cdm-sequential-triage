@@ -1,0 +1,7 @@
+{
+  "preregistration": "/workspace/cdm-sequential-triage/artifacts/next_validation_preregistration_v12.json",
+  "preregistration_sha256": "de0989e07742bed934f1e02ce3c256583e1f94486bfd173bf291f7c1cf391596",
+  "planning": "/workspace/cdm-sequential-triage/reports/next_validation_sample_size_v12.csv",
+  "planning_sha256": "edc0e451141c442c859220f269b93f3d6d4d730382e68321daa96b26b1ae21b9",
+  "frozen_at_utc": "2026-07-26T21:18:35.832533+00:00"
+}

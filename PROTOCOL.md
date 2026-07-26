@@ -33,3 +33,9 @@ Primary confirmatory metrics are event-level dangerous-exclusion count/rate with
 The frozen policy was calibrated on 73 positive calibration events. PAC rank = 3, threshold = 0.002248533976580822, and the 95% calibration bound is 0.083741 at alpha = 0.10.
 
 The single locked evaluation run produced 4 dangerous exclusions among 73 positive events: observed rate 5.48%, one-sided 95% Clopper-Pearson upper bound 12.10%. The policy assigned SAFE-EXCLUDE to 1,807 of 2,558 negative events (70.64%); median first decision time was 5.53 days before TCA. The pre-specified criterion requiring the evaluation upper bound to be no greater than 10% was not met. No second confirmatory run is permitted.
+
+## Revised candidate for a genuinely new study
+Development tuning closed after the v11 calibration-stability diagnostic. The revised candidate is frozen in `artifacts/next_validation_preregistration_v12.json`; its lock must not be replaced or deleted. This candidate is post-confirmation development and has no valid claim on `confirmation_v1`, which is previously unblinded historical evidence.
+
+The next study requires new event sequences split into disjoint calibration and evaluation sets before outcome access. The planning target is at least 100 positive calibration events and 200 positive evaluation events. Model parameters, feature construction, hard-prefix weighting, decision window, minimum history, calibration mode, alpha, and primary success criterion are fixed by the preregistration artifact. No threshold or model tuning is permitted after new outcomes are accessed.
+

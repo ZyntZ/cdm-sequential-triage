@@ -17,6 +17,11 @@ from score_ensemble_diagnostics import evaluate_ensembles
 from repeated_calibration_stability import (
     repeated_calibration_stability, summarize_stability, validate_oof_scores,
 )
+from freeze_next_validation import freeze_plan
+from validation_plan import (
+    evaluation_planning_table, maximum_passing_failures,
+    minimum_positive_events, pass_probability,
+)
 from prefix_features import build_prefix_features, eligible_prefixes
 from robustness import subgroup_metrics
 from shift_gate import ConformalShiftGate
@@ -462,6 +467,40 @@ def test_repeated_stability_rejects_nonfinite_scores():
         validate_oof_scores(
             frame, ("catboost_snapshot", "catboost_tail_aligned", "minimum")
         )
+
+
+def test_validation_plan_known_clopper_pearson_requirements():
+    assert minimum_positive_events(0) == 29
+    assert minimum_positive_events(4) == 89
+    assert maximum_passing_failures(200) == 12
+    assert 0.79 < pass_probability(200, 0.05) < 0.80
+
+
+def test_evaluation_planning_table_is_monotone_in_true_risk():
+    table = evaluation_planning_table(positive_counts=(100, 200))
+    assert table["positive_events"].tolist() == [100, 200]
+    assert (
+        table["pass_probability_if_true_rate_0.04"]
+        >= table["pass_probability_if_true_rate_0.05"]
+    ).all()
+    assert (
+        table["pass_probability_if_true_rate_0.05"]
+        >= table["pass_probability_if_true_rate_0.06"]
+    ).all()
+
+
+def test_freeze_next_validation_creates_immutable_lock(tmp_path):
+    terminal = tmp_path / "terminal.json"
+    terminal.write_text('{"status":"development-complete"}\n')
+    output = tmp_path / "preregistration.json"
+    lock = tmp_path / "preregistration.lock"
+    planning = tmp_path / "planning.csv"
+    payload = freeze_plan([terminal], output, lock, planning)
+    assert payload["candidate"]["score"] == "catboost_tail_aligned"
+    assert payload["evaluation_accessed"] is False
+    assert output.exists() and lock.exists() and planning.exists()
+    with np.testing.assert_raises(FileExistsError):
+        freeze_plan([terminal], output, lock, planning)
 
 def test_nested_gate_roles_are_disjoint():
     folds = [0, 1, 2, 3, 4]
