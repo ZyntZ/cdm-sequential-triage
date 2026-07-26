@@ -9,7 +9,8 @@ from shift_gate import ConformalShiftGate
 from triage import Decision, SequentialTriagePolicy
 from policy import (
     calibration_rank, calibrate_positive_threshold, cp_upper,
-    event_policy_table, evaluate_threshold, history_gated_event_table,
+    event_policy_table, evaluate_sequential_policy, evaluate_threshold,
+    first_safe_decision_table, history_gated_event_table,
 )
 
 
@@ -126,7 +127,9 @@ def test_history_gate_keeps_ineligible_events():
         "score": [0.4, 0.2, 0.1],
         "n_cdm_so_far": [1, 2, 1],
     })
-    events = history_gated_event_table(prefixes, "score", minimum_history=2)
+    events = history_gated_event_table(
+        prefixes, "score", minimum_history=2, history_col="n_cdm_so_far"
+    )
     events = events.set_index("event_id")
     assert events.loc[1, "min_score"] == 0.2
     assert np.isinf(events.loc[2, "min_score"])
@@ -139,8 +142,59 @@ def test_history_gate_rejects_invalid_minimum():
         "score": [0.2], "n_cdm_so_far": [1],
     })
     with np.testing.assert_raises(ValueError):
-        history_gated_event_table(prefixes, "score", minimum_history=0)
+        history_gated_event_table(
+            prefixes, "score", minimum_history=0, history_col="n_cdm_so_far"
+        )
 
+
+
+def test_eligible_history_count_starts_when_decision_window_opens():
+    raw = pd.DataFrame({
+        "event_id": [1, 1, 1, 1],
+        "time_to_tca": [9.0, 8.0, 7.0, 6.0],
+        "risk": [-9.0, -9.0, -9.0, -9.0],
+        "max_risk_estimate": [-8.0, -8.0, -8.0, -8.0],
+        "miss_distance": [100.0, 100.0, 100.0, 100.0],
+        "mahalanobis_distance": [5.0, 5.0, 5.0, 5.0],
+        "y": [0, 0, 0, 0],
+    })
+    selected = eligible_prefixes(build_prefix_features(raw))
+    assert selected["n_cdm_so_far"].tolist() == [3, 4]
+    assert selected["eligible_history_count"].tolist() == [1, 2]
+
+
+def test_first_safe_decision_uses_window_history_and_keeps_all_events():
+    prefixes = pd.DataFrame({
+        "event_id": [1, 1, 1, 2],
+        "y": [0, 0, 0, 1],
+        "time_to_tca": [7.0, 6.0, 5.0, 7.0],
+        "score": [0.10, 0.30, 0.15, 0.90],
+        "eligible_history_count": [1, 2, 3, 1],
+    })
+    decisions = first_safe_decision_table(
+        prefixes, "score", threshold=0.20, minimum_history=2
+    ).set_index("event_id")
+    assert decisions.loc[1, "safe_exclude"]
+    assert decisions.loc[1, "first_safe_tca"] == 5.0
+    assert not decisions.loc[2, "safe_exclude"]
+    assert np.isnan(decisions.loc[2, "first_safe_tca"])
+
+
+def test_sequential_evaluation_reports_event_level_timing():
+    prefixes = pd.DataFrame({
+        "event_id": [1, 1, 2, 3],
+        "y": [0, 0, 0, 1],
+        "time_to_tca": [7.0, 6.0, 5.0, 4.0],
+        "score": [0.30, 0.10, 0.15, 0.90],
+        "eligible_history_count": [1, 2, 1, 1],
+    })
+    result = evaluate_sequential_policy(
+        prefixes, "score", threshold=0.20, minimum_history=1
+    )
+    assert result["danger_k"] == 0
+    assert result["safe_negative"] == 2
+    assert result["safe_negative_rate"] == 1.0
+    assert result["median_first_safe_tca"] == 5.5
 
 def test_shift_gate_calibration_and_blocking():
     proper = pd.DataFrame({

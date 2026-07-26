@@ -34,7 +34,7 @@ def history_gated_event_table(
     prefix_scores: pd.DataFrame,
     score_col: str,
     minimum_history: int,
-    history_col: str = "n_cdm_so_far",
+    history_col: str = "eligible_history_count",
 ) -> pd.DataFrame:
     """Aggregate scores after a minimum-history gate without dropping events.
 
@@ -145,3 +145,91 @@ def calibrate_positive_threshold(
         "marginal_bound": float(marginal_bound),
         "pac_bound": float(pac_bound),
     }
+
+def first_safe_decision_table(
+    prefix_scores: pd.DataFrame,
+    score_col: str,
+    threshold: float,
+    minimum_history: int = 1,
+    history_col: str = "eligible_history_count",
+) -> pd.DataFrame:
+    """Return one event-level row with the first eligible SAFE-EXCLUDE time.
+
+    Input rows must already be restricted to the frozen decision window. The
+    history counter is therefore interpreted within that window, matching the
+    runtime policy. Events that never cross the threshold are retained.
+    """
+    if minimum_history < 1:
+        raise ValueError("minimum_history must be at least one")
+    required = {"event_id", "y", score_col, "time_to_tca", history_col}
+    missing = required.difference(prefix_scores.columns)
+    if missing:
+        raise ValueError(f"Missing required columns: {sorted(missing)}")
+    if prefix_scores.empty:
+        raise ValueError("prefix_scores must contain at least one row")
+    if prefix_scores.duplicated(["event_id", "time_to_tca"]).any():
+        raise ValueError("Duplicate event_id/time_to_tca rows are not allowed")
+    label_counts = prefix_scores.groupby("event_id")["y"].nunique()
+    if (label_counts != 1).any():
+        raise ValueError("Each event_id must have one event-level label")
+
+    ordered = prefix_scores.sort_values(
+        ["event_id", "time_to_tca"], ascending=[True, False]
+    ).copy()
+    eligible = (
+        (ordered[history_col] >= minimum_history)
+        & (ordered[score_col] <= threshold)
+    )
+    safe_rows = ordered.loc[eligible].drop_duplicates("event_id", keep="first")
+    labels = ordered.groupby("event_id", as_index=False).agg(y=("y", "first"))
+    decisions = safe_rows.loc[:, ["event_id", "time_to_tca", score_col]].rename(
+        columns={
+            "time_to_tca": "first_safe_tca",
+            score_col: "first_safe_score",
+        }
+    )
+    result = labels.merge(decisions, on="event_id", how="left", validate="one_to_one")
+    result["safe_exclude"] = result["first_safe_tca"].notna()
+    return result
+
+
+def evaluate_sequential_policy(
+    prefix_scores: pd.DataFrame,
+    score_col: str,
+    threshold: float,
+    minimum_history: int = 1,
+    history_col: str = "eligible_history_count",
+    confidence: float = 0.95,
+) -> dict:
+    """Evaluate event-level safety, automation and first-decision timing."""
+    decisions = first_safe_decision_table(
+        prefix_scores=prefix_scores,
+        score_col=score_col,
+        threshold=threshold,
+        minimum_history=minimum_history,
+        history_col=history_col,
+    )
+    positive = decisions["y"] == 1
+    negative = ~positive
+    n_positive = int(positive.sum())
+    n_negative = int(negative.sum())
+    if n_positive == 0 or n_negative == 0:
+        raise ValueError("Evaluation requires positive and negative events")
+    danger_k = int((decisions["safe_exclude"] & positive).sum())
+    safe_negative = decisions["safe_exclude"] & negative
+    first_safe = decisions.loc[safe_negative, "first_safe_tca"]
+    return {
+        "threshold": float(threshold),
+        "minimum_history": int(minimum_history),
+        "danger_k": danger_k,
+        "danger_n": n_positive,
+        "danger_rate": danger_k / n_positive,
+        "danger_ucb": cp_upper(danger_k, n_positive, confidence),
+        "safe_negative": int(safe_negative.sum()),
+        "negative_n": n_negative,
+        "safe_negative_rate": float(safe_negative.sum() / n_negative),
+        "median_first_safe_tca": (
+            None if first_safe.empty else float(first_safe.median())
+        ),
+    }
+

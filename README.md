@@ -28,6 +28,8 @@ A split-conformal applicability gate is implemented for numeric event features. 
 
 The runtime policy combines the calibrated lower threshold, minimum-history rule, applicability gate, and the calibrated 2–7 day decision window. Updates outside the window remain auditable but cannot receive `SAFE-EXCLUDE`; the minimum-history counter includes only updates inside the window. Every accepted update records its sequence number, eligible-history count, score, gate result, decision, and reason. Out-of-order event updates are rejected. The `ESCALATE` threshold is an operational prioritisation setting and is not covered by the dangerous-exclusion guarantee.
 
+Offline diagnostics now use `eligible_history_count`, which starts when the 2–7 day decision window opens. This matches the runtime counter; total pre-window history remains available separately as `n_cdm_so_far`.
+
 ## Reproducibility
 - Dataset source/checksums: `data/manifest.json`
 - Statistical protocol: `PROTOCOL.md`
@@ -36,6 +38,7 @@ The runtime policy combines the calibrated lower threshold, minimum-history rule
 - Conformal applicability gate: `src/shift_gate.py`
 - Stateful three-decision policy and audit log: `src/triage.py`
 - Calibration diagnostics: `python scripts/calibration_diagnostics.py --output reports/calibration.csv`
+- Minimum-history/timing diagnostics: `python scripts/history_gate_diagnostics.py --output reports/history_gate.csv`
 - Subgroup diagnostics: `python scripts/robustness_diagnostics.py --group mission_id --output reports/mission.csv`
 - Tests: `pytest -q`
 

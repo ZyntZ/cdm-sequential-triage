@@ -1,4 +1,4 @@
-# Development protocol v0.1 — 2026-07-24
+# Development protocol v0.2 — 2026-07-26
 
 ## Confirmatory target
 Y = 1{final log10(Pc) >= -6}, where final is the row with minimum time_to_tca for an event.
@@ -24,5 +24,10 @@ P(any SAFE-EXCLUDE during the eligible trajectory | Y=1).
 4. Confirmation: evaluate once on untouched internal evaluation events.
 5. External stress test: ESA official test only if released labels are obtained; it is not called an independent random test.
 
+## Frozen candidate specification
+The frozen candidate is the CatBoost snapshot score, PAC rank calibration, alpha = 0.10, 95% calibration confidence, a 2–7 day decision window, and minimum_history = 3 counted only after the window opens. This operating point was selected on development data because it had the highest observed safe-negative rate among candidates whose pooled development UCB95 did not exceed 10%. No calibration or evaluation outcomes were inspected for this choice.
+
+Primary confirmatory metrics are event-level dangerous-exclusion count/rate with a one-sided 95% Clopper-Pearson upper bound, safe-negative rate, and median first SAFE-EXCLUDE time before TCA. The confirmation pass is run once after calibration.
+
 ## Current status
-Pilot only. No confirmatory result has been produced.
+Freeze-ready pilot. Calibration and evaluation partitions have not been accessed, and no confirmatory result has been produced.

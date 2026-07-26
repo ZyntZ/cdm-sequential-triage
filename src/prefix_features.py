@@ -33,8 +33,21 @@ def build_prefix_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def eligible_prefixes(features: pd.DataFrame, min_days: float = 2.0, max_days: float = 7.0) -> pd.DataFrame:
+    """Select the decision window and count history from its opening.
+
+    ``n_cdm_so_far`` counts all messages seen for an event. The separate
+    ``eligible_history_count`` starts at one when the 2--7 day decision window
+    opens, which matches :class:`SequentialTriagePolicy` at runtime.
+    """
     if not 0 <= min_days < max_days:
         raise ValueError("Require 0 <= min_days < max_days")
-    return features.loc[
+    selected = features.loc[
         features["time_to_tca"].between(min_days, max_days, inclusive="both")
     ].copy()
+    selected = selected.sort_values(
+        ["event_id", "time_to_tca"], ascending=[True, False]
+    )
+    selected["eligible_history_count"] = (
+        selected.groupby("event_id", sort=False).cumcount() + 1
+    )
+    return selected

@@ -11,6 +11,9 @@ The largest positive-event groups were mission 1 (51 positives), mission 2 (31),
 No mission-level guarantee is claimed. Mission 15 had the largest dangerous count among the better represented missions (3/13), while mission 6 had 2/13. These groups should be included in later stress tests. Mission 24 had no positive event and therefore cannot support a dangerous-error estimate.
 
 ## Available history
+
+> The minimum-history gate results below used total `n_cdm_so_far` rather than the runtime counter that starts when the decision window opens. They are retained as an audit trail but are superseded by `DEVELOPMENT_NOTE_003_RU.md` and `development_history_gate_window_v5.csv`. Subgroup counts by total CDMs available in the window remain descriptive.
+
 Events were grouped by the number of CDMs available in the 2–7 day decision window.
 
 | CDMs in window | Events | Positive events | Dangerous exclusions | Safe-negative rate |
@@ -53,6 +56,4 @@ Safe-negative coverage differed across completeness groups (chi-square 33.08, 2 
 Missingness is not monotonic with observed danger in this development sample. A blanket rejection rule based only on missing-field fraction is therefore not supported. Completeness remains a monitoring variable for the shift gate.
 
 ## Current decision
-CatBoost snapshot with PAC calibration at alpha 0.10 remains the leading candidate. A three-CDM minimum-history gate is retained as a candidate safety rule because it improved the development danger bound while preserving 67.95% safe-negative coverage. It is not frozen yet.
-
-The next step is to compare the ungated and three-CDM policies under repeated cross-fitting, then freeze one policy before using the calibration partition.
+Superseded on 26.07.2026 after aligning the offline history counter with runtime semantics. The frozen development candidate is CatBoost snapshot with PAC calibration at alpha 0.10 and three eligible CDMs inside the decision window. See `DEVELOPMENT_NOTE_003_RU.md`.
