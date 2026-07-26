@@ -12,6 +12,8 @@ from event_aligned_model import positive_tail_weights, prepare_dynamic_frame
 from event_aligned_robustness import (
     attach_candidate_scores, event_groups, paired_subgroup_table,
 )
+from score_ensemble import combine_scores
+from score_ensemble_diagnostics import evaluate_ensembles
 from prefix_features import build_prefix_features, eligible_prefixes
 from robustness import subgroup_metrics
 from shift_gate import ConformalShiftGate
@@ -372,6 +374,33 @@ def test_paired_subgroup_table_reports_directional_changes():
     assert result["danger_gained_events"] == 1
     assert result["danger_lost_events"] == 1
     assert result["median_timing_delta_days"] == 1.0
+
+
+def test_score_combinations_preserve_lower_is_safer_semantics():
+    frame = pd.DataFrame({
+        "catboost_snapshot": [0.1, 0.8],
+        "catboost_tail_aligned": [0.2, 0.6],
+    })
+    combined = combine_scores(frame)
+    assert combined.loc[0, "arithmetic_mean"] < combined.loc[1, "arithmetic_mean"]
+    assert combined.loc[0, "geometric_mean"] < combined.loc[1, "geometric_mean"]
+    assert np.all(combined["maximum"] >= combined["catboost_snapshot"])
+    assert np.all(combined["maximum"] >= combined["catboost_tail_aligned"])
+    assert np.all(combined["minimum"] <= combined["catboost_snapshot"])
+    assert np.all(combined["minimum"] <= combined["catboost_tail_aligned"])
+
+
+def test_score_combinations_reject_nonfinite_and_out_of_range_inputs():
+    with np.testing.assert_raises(ValueError):
+        combine_scores(pd.DataFrame({
+            "catboost_snapshot": [0.1, np.nan],
+            "catboost_tail_aligned": [0.2, 0.3],
+        }))
+    with np.testing.assert_raises(ValueError):
+        combine_scores(pd.DataFrame({
+            "catboost_snapshot": [0.1, 1.1],
+            "catboost_tail_aligned": [0.2, 0.3],
+        }))
 
 def test_nested_gate_roles_are_disjoint():
     folds = [0, 1, 2, 3, 4]
