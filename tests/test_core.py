@@ -205,6 +205,61 @@ def test_sequential_evaluation_reports_event_level_timing():
     assert result["safe_negative_rate"] == 1.0
     assert result["median_first_safe_tca"] == 5.5
 
+
+def test_offline_shift_gate_matches_runtime_safe_decisions():
+    proper = pd.DataFrame({"gate_feature": [0.0, 0.5, 1.0, 1.5, 2.0]})
+    calibration = pd.DataFrame({
+        "gate_feature": np.linspace(0.0, 2.0, 39),
+    })
+    gate = ConformalShiftGate(["gate_feature"]).fit(proper)
+    gate.calibrate(calibration, alpha=0.10)
+    prefixes = pd.DataFrame({
+        "event_id": [1, 1, 2, 2, 3],
+        "y": [0, 0, 0, 0, 1],
+        "time_to_tca": [6.0, 5.0, 6.0, 5.0, 6.0],
+        "score": [0.10, 0.10, 0.10, 0.10, 0.90],
+        "eligible_history_count": [1, 2, 1, 2, 1],
+        "gate_feature": [20.0, 1.0, 1.0, 1.0, 1.0],
+    })
+
+    decisions = first_safe_decision_table(
+        prefixes, "score", threshold=0.20, minimum_history=1, shift_gate=gate
+    ).set_index("event_id")
+
+    assert decisions.loc[1, "safe_exclude"]
+    assert decisions.loc[1, "first_safe_tca"] == 5.0
+    assert decisions.loc[1, "shift_gate_blocked"]
+    assert decisions.loc[1, "first_blocked_safe_tca"] == 6.0
+    assert decisions.loc[2, "safe_exclude"]
+    assert not decisions.loc[2, "shift_gate_blocked"]
+    assert not decisions.loc[3, "safe_exclude"]
+
+
+def test_offline_shift_gate_blocks_all_threshold_crossings_with_missing_features():
+    proper = pd.DataFrame({"gate_feature": [0.0, 0.5, 1.0, 1.5, 2.0]})
+    calibration = pd.DataFrame({
+        "gate_feature": np.linspace(0.0, 2.0, 39),
+    })
+    gate = ConformalShiftGate(["gate_feature"]).fit(proper)
+    gate.calibrate(calibration, alpha=0.10)
+    prefixes = pd.DataFrame({
+        "event_id": [1, 2],
+        "y": [0, 1],
+        "time_to_tca": [5.0, 5.0],
+        "score": [0.10, 0.90],
+        "eligible_history_count": [1, 1],
+        "gate_feature": [np.nan, 1.0],
+    })
+
+    result = evaluate_sequential_policy(
+        prefixes, "score", threshold=0.20, shift_gate=gate
+    )
+
+    assert result["safe_negative"] == 0
+    assert result["shift_gate_blocked_events"] == 1
+    assert result["shift_gate_blocked_negative"] == 1
+    assert result["shift_gate_blocked_positive"] == 0
+
 def test_shift_gate_calibration_and_blocking():
     proper = pd.DataFrame({
         "risk": [-9.0, -8.5, -8.0, -7.5, -7.0],

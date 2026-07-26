@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import beta
 
+from shift_gate import ConformalShiftGate
+
 
 def cp_upper(k: int, n: int, confidence: float = 0.95) -> float:
     if not (0 <= k <= n) or n <= 0:
@@ -152,12 +154,16 @@ def first_safe_decision_table(
     threshold: float,
     minimum_history: int = 1,
     history_col: str = "eligible_history_count",
+    shift_gate: ConformalShiftGate | None = None,
 ) -> pd.DataFrame:
-    """Return one event-level row with the first eligible SAFE-EXCLUDE time.
+    """Return one event-level row with the first permitted SAFE-EXCLUDE time.
 
-    Input rows must already be restricted to the frozen decision window. The
-    history counter is therefore interpreted within that window, matching the
-    runtime policy. Events that never cross the threshold are retained.
+    Input rows must already be restricted to the decision window. The history
+    counter is therefore interpreted within that window, matching the runtime
+    policy. If supplied, ``shift_gate`` must have been fitted and calibrated on
+    data independent of the rows being evaluated. A threshold crossing blocked
+    by the gate is retained as an audit field but is not a SAFE-EXCLUDE.
+    Events that never receive SAFE-EXCLUDE are retained.
     """
     if minimum_history < 1:
         raise ValueError("minimum_history must be at least one")
@@ -176,11 +182,24 @@ def first_safe_decision_table(
     ordered = prefix_scores.sort_values(
         ["event_id", "time_to_tca"], ascending=[True, False]
     ).copy()
-    eligible = (
+    threshold_crossing = (
         (ordered[history_col] >= minimum_history)
         & (ordered[score_col] <= threshold)
     )
-    safe_rows = ordered.loc[eligible].drop_duplicates("event_id", keep="first")
+    if shift_gate is None:
+        gate_allowed = pd.Series(True, index=ordered.index, dtype=bool)
+    else:
+        gate_allowed = shift_gate.allows_safe_exclude(ordered)
+        if not gate_allowed.index.equals(ordered.index):
+            raise ValueError("Shift-gate result index does not match prefix rows")
+        gate_allowed = gate_allowed.astype(bool)
+
+    safe_rows = ordered.loc[threshold_crossing & gate_allowed].drop_duplicates(
+        "event_id", keep="first"
+    )
+    blocked_rows = ordered.loc[threshold_crossing & ~gate_allowed].drop_duplicates(
+        "event_id", keep="first"
+    )
     labels = ordered.groupby("event_id", as_index=False).agg(y=("y", "first"))
     decisions = safe_rows.loc[:, ["event_id", "time_to_tca", score_col]].rename(
         columns={
@@ -188,8 +207,16 @@ def first_safe_decision_table(
             score_col: "first_safe_score",
         }
     )
+    blocked = blocked_rows.loc[:, ["event_id", "time_to_tca", score_col]].rename(
+        columns={
+            "time_to_tca": "first_blocked_safe_tca",
+            score_col: "first_blocked_safe_score",
+        }
+    )
     result = labels.merge(decisions, on="event_id", how="left", validate="one_to_one")
+    result = result.merge(blocked, on="event_id", how="left", validate="one_to_one")
     result["safe_exclude"] = result["first_safe_tca"].notna()
+    result["shift_gate_blocked"] = result["first_blocked_safe_tca"].notna()
     return result
 
 
@@ -200,6 +227,7 @@ def evaluate_sequential_policy(
     minimum_history: int = 1,
     history_col: str = "eligible_history_count",
     confidence: float = 0.95,
+    shift_gate: ConformalShiftGate | None = None,
 ) -> dict:
     """Evaluate event-level safety, automation and first-decision timing."""
     decisions = first_safe_decision_table(
@@ -208,6 +236,7 @@ def evaluate_sequential_policy(
         threshold=threshold,
         minimum_history=minimum_history,
         history_col=history_col,
+        shift_gate=shift_gate,
     )
     positive = decisions["y"] == 1
     negative = ~positive
@@ -228,6 +257,13 @@ def evaluate_sequential_policy(
         "safe_negative": int(safe_negative.sum()),
         "negative_n": n_negative,
         "safe_negative_rate": float(safe_negative.sum() / n_negative),
+        "shift_gate_blocked_events": int(decisions["shift_gate_blocked"].sum()),
+        "shift_gate_blocked_positive": int(
+            (decisions["shift_gate_blocked"] & positive).sum()
+        ),
+        "shift_gate_blocked_negative": int(
+            (decisions["shift_gate_blocked"] & negative).sum()
+        ),
         "median_first_safe_tca": (
             None if first_safe.empty else float(first_safe.median())
         ),
