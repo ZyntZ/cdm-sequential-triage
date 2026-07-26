@@ -32,6 +32,8 @@ The runtime policy combines the calibrated lower threshold, minimum-history rule
 
 Offline diagnostics now use `eligible_history_count`, which starts when the 2–7 day decision window opens. This matches the runtime counter; total pre-window history remains available separately as `n_cdm_so_far`.
 
+The first nested gate-aware development diagnostic used current `risk` as the only available gate feature and event-level gate alpha 0.05. It blocked no held-out events and produced exactly the same safety and automation metrics as its ungated control for minimum histories 1, 3, 4, and 5. This is a negative development result: current risk alone does not provide a useful applicability gate on these folds. It is not evidence that a richer pre-specified gate will be ineffective.
+
 ## Reproducibility
 - Dataset source/checksums: `data/manifest.json`
 - Statistical protocol: `PROTOCOL.md`
@@ -42,6 +44,7 @@ Offline diagnostics now use `eligible_history_count`, which starts when the 2–
 - Shift-gate artifacts are fitted on training events, calibrated from the maximum nonconformity over each calibration event's 2–7 day path, and fingerprinted before use in confirmation.
 - Calibration diagnostics: `python scripts/calibration_diagnostics.py --output reports/calibration.csv`
 - Minimum-history/timing diagnostics: `python scripts/history_gate_diagnostics.py --output reports/history_gate.csv`
+- Nested gate-aware diagnostics: `python scripts/history_gate_diagnostics.py --scores artifacts/development_oof_model_comparison_v2.parquet --score-col catboost_snapshot --minimum-history 1 3 4 5 --gate-features risk --gate-alpha 0.05 --output reports/development_shift_gate_crossfit_v6.csv`. Each held-out fold uses disjoint folds for gate fitting, event-level gate calibration, and policy calibration; the output includes an ungated control under the same fold allocation.
 - Build frozen event partitions: `python scripts/make_partitions.py --archive data/raw/train_data.zip --output-dir data/processed/partitions --manifest data/processed/partitions.json --expected-sha256 68362fe5629cc80f17291f2d73f733bf4e922675e37b91a8ee79afadb46f3edc`
 - Train and score frozen snapshot model: `python scripts/train_snapshot.py --training data/processed/partitions/training.parquet --calibration data/processed/partitions/calibration.parquet --evaluation-features data/processed/partitions/evaluation_features.parquet --model artifacts/catboost_snapshot.cbm --calibration-scores artifacts/calibration_scores.parquet --evaluation-scores artifacts/evaluation_scores.parquet --manifest artifacts/snapshot_model.json`
 - Gate-aware training and scoring: add `--gate-features risk miss_distance mahalanobis_distance --gate-output artifacts/shift_gate.json --gate-alpha 0.05`; the selected numeric columns are retained in both score files.

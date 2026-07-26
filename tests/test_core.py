@@ -3,6 +3,10 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
+from history_gate_diagnostics import (
+    attach_gate_features, crossfit_shift_gate, nested_gate_roles,
+)
 from prefix_features import build_prefix_features, eligible_prefixes
 from robustness import subgroup_metrics
 from shift_gate import ConformalShiftGate
@@ -260,6 +264,69 @@ def test_offline_shift_gate_blocks_all_threshold_crossings_with_missing_features
     assert result["shift_gate_blocked_negative"] == 1
     assert result["shift_gate_blocked_positive"] == 0
 
+
+
+
+def test_gate_feature_join_requires_exact_prefix_keys():
+    scores = pd.DataFrame({
+        "event_id": [1, 1, 2],
+        "time_to_tca": [6.0, 5.0, 6.0],
+        "score": [0.1, 0.2, 0.3],
+    })
+    features = pd.DataFrame({
+        "event_id": [1, 1, 2],
+        "time_to_tca": [6.0, 5.0, 6.0],
+        "gate_feature": [10.0, 11.0, 12.0],
+    })
+    merged = attach_gate_features(scores, features, ["gate_feature"])
+    assert merged["gate_feature"].tolist() == [10.0, 11.0, 12.0]
+
+    with np.testing.assert_raises(ValueError):
+        attach_gate_features(scores, features.iloc[:-1], ["gate_feature"])
+
+def test_nested_gate_roles_are_disjoint():
+    folds = [0, 1, 2, 3, 4]
+    for evaluation_fold in folds:
+        roles = nested_gate_roles(folds, evaluation_fold)
+        assigned = [fold for values in roles.values() for fold in values]
+        assert sorted(assigned) == folds
+        assert len(assigned) == len(set(assigned))
+        assert roles["evaluation"] == [evaluation_fold]
+        assert len(roles["gate_training"]) == 2
+
+
+def test_gate_aware_crossfit_keeps_complete_event_denominators():
+    rows = []
+    for fold in range(5):
+        for local_event in range(10):
+            event_id = fold * 100 + local_event
+            label = int(local_event < 4)
+            for step, time_to_tca in enumerate([6.0, 5.0]):
+                rows.append({
+                    "event_id": event_id,
+                    "time_to_tca": time_to_tca,
+                    "y": label,
+                    "fold": fold,
+                    "score": 0.8 if label else 0.1 + 0.01 * step,
+                    "gate_feature": float(local_event) + 0.1 * step,
+                })
+    result = crossfit_shift_gate(
+        pd.DataFrame(rows),
+        score_col="score",
+        gate_features=["gate_feature"],
+        minimum_histories=[1],
+        alpha=0.30,
+        mode="marginal",
+        confidence=0.95,
+        gate_alpha=0.20,
+    ).iloc[0]
+
+    assert result["danger_n"] == 20
+    assert result["negative_n"] == 30
+    assert result["danger_k"] == 0
+    assert result["safe_negative"] <= result["negative_n"]
+    assert "gate_cal=" in result["fold_roles"]
+    assert "policy_cal=" in result["fold_roles"]
 
 def test_shift_gate_event_calibration_uses_complete_event_paths():
     proper = pd.DataFrame({"gate_feature": np.linspace(0.0, 1.0, 20)})
