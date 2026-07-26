@@ -179,6 +179,7 @@ def crossfit_shift_gate(
         policy_thresholds = []
         gate_thresholds = []
         role_records = []
+        gate_flagged_events = []
         for evaluation_fold in folds:
             roles = nested_gate_roles(folds, evaluation_fold)
             gate_training = ordered.loc[ordered["fold"].isin(roles["gate_training"])]
@@ -229,6 +230,9 @@ def crossfit_shift_gate(
                 minimum_history=minimum_history,
                 shift_gate=gate,
             )
+            gate_allowed_held_out = gate.allows_safe_exclude(held_out)
+            flagged = (~gate_allowed_held_out).groupby(held_out["event_id"]).any()
+            decisions["gate_flagged_any_prefix"] = decisions["event_id"].map(flagged).fillna(False)
             decisions["fold"] = evaluation_fold
             held_out_decisions.append(decisions)
             policy_ranks.append(policy_rule["rank"])
@@ -252,6 +256,7 @@ def crossfit_shift_gate(
         control_danger = control_combined["safe_exclude"] & positive
         control_safe_negative = control_combined["safe_exclude"] & negative
         blocked = combined["shift_gate_blocked"]
+        flagged_any = combined["gate_flagged_any_prefix"]
         first_safe_tca = combined.loc[safe_negative, "first_safe_tca"]
         danger_n = int(positive.sum())
         negative_n = int(negative.sum())
@@ -273,6 +278,10 @@ def crossfit_shift_gate(
             "delta_danger_k_vs_control": int(danger.sum() - control_danger.sum()),
             "delta_safe_negative_vs_control": int(safe_negative.sum() - control_safe_negative.sum()),
             "median_first_safe_tca_days": float(first_safe_tca.median()),
+            "gate_flagged_events": int(flagged_any.sum()),
+            "gate_flagged_positive": int((flagged_any & positive).sum()),
+            "gate_flagged_negative": int((flagged_any & negative).sum()),
+            "gate_flagged_rate": float(flagged_any.mean()),
             "gate_blocked_events": int(blocked.sum()),
             "gate_blocked_positive": int((blocked & positive).sum()),
             "gate_blocked_negative": int((blocked & negative).sum()),

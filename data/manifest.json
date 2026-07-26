@@ -6,7 +6,8 @@
   "files": {
     "train_data.zip": {
       "bytes": 87718091,
-      "sha256": "68362fe5629cc80f17291f2d73f733bf4e922675e37b91a8ee79afadb46f3edc"
+      "sha256": "68362fe5629cc80f17291f2d73f733bf4e922675e37b91a8ee79afadb46f3edc",
+      "verified_from_zenodo_archive": true
     },
     "test_data.csv": {
       "bytes": 35303060,
@@ -14,5 +15,12 @@
     }
   },
   "known_selection_note": "ESA states train/test were not randomly sampled; test over-represents high-risk events and omits CDMs within 2 days of TCA.",
-  "test_labels": "Not present in the Kelvins test_data.csv downloaded here; Zenodo full archive download was blocked by HTTP 403 in this environment."
+  "test_labels": "The public Kelvins test_data.csv has no labels. No official test outcomes were used in this development update.",
+  "zenodo_record": {
+    "doi": "10.5281/zenodo.4463683",
+    "record_id": 4463683,
+    "archive": "Collision Avoidance Challenge - Dataset.zip",
+    "bytes": 221128642,
+    "md5": "d19dc8875229f2f6893253c38adddc87"
+  }
 }

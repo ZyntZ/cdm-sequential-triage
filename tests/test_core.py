@@ -325,6 +325,8 @@ def test_gate_aware_crossfit_keeps_complete_event_denominators():
     assert result["negative_n"] == 30
     assert result["danger_k"] == 0
     assert result["safe_negative"] <= result["negative_n"]
+    assert result["gate_flagged_events"] >= result["gate_blocked_events"]
+    assert result["gate_flagged_positive"] + result["gate_flagged_negative"] == result["gate_flagged_events"]
     assert "gate_cal=" in result["fold_roles"]
     assert "policy_cal=" in result["fold_roles"]
 
