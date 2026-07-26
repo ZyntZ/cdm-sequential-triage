@@ -1,0 +1,10 @@
+{
+  "started_at_utc": "2026-07-26T15:50:37.986520+00:00",
+  "calibration_artifact": "/tmp/esa-partitions-check/artifacts/calibration.json",
+  "calibration_artifact_sha256": "02675bd8f44f93605c706c0dbf1d62e4524fdee3da4bd4a129b037d8ebca8961",
+  "evaluation_scores": "/tmp/esa-partitions-check/artifacts/evaluation_scores.parquet",
+  "evaluation_scores_sha256": "037907923899bbe12e81691bebc3d82aa8bc65bec4fb0f0e12fdec1caf86269a",
+  "evaluation_labels": "/tmp/esa-partitions-check/parts/evaluation_labels.parquet",
+  "evaluation_labels_sha256": "7e85964041541bf93e0ba2f40e00201ac51aa1cfbb47cc9cb0f4063c1962f1b0",
+  "output": "/tmp/esa-partitions-check/artifacts/confirmation.json"
+}

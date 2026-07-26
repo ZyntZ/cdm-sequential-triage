@@ -1,0 +1,73 @@
+{
+  "created_at_utc": "2026-07-26T15:49:37.087753+00:00",
+  "model": "CatBoostClassifier snapshot",
+  "model_params": {
+    "iterations": 500,
+    "depth": 6,
+    "learning_rate": 0.05,
+    "loss_function": "Logloss",
+    "random_seed": 24072026,
+    "thread_count": 1,
+    "verbose": false,
+    "allow_writing_files": false
+  },
+  "numeric_features": [
+    "time_to_tca",
+    "risk",
+    "max_risk_estimate",
+    "max_risk_scaling",
+    "miss_distance",
+    "relative_speed",
+    "mahalanobis_distance",
+    "t_position_covariance_det",
+    "c_position_covariance_det",
+    "t_obs_available",
+    "t_obs_used",
+    "t_weighted_rms",
+    "c_obs_available",
+    "c_obs_used",
+    "c_weighted_rms"
+  ],
+  "categorical_features": [
+    "mission_id",
+    "c_object_type"
+  ],
+  "window_days": [
+    2.0,
+    7.0
+  ],
+  "prefix_weighting": "equal total weight per event",
+  "inputs": {
+    "training": {
+      "path": "/tmp/esa-partitions-check/parts/training.parquet",
+      "sha256": "0a27a6afd44a0b8094b5059c93f648597bcbd4fff0f87e8a90ffd6fa8883b968"
+    },
+    "calibration": {
+      "path": "/tmp/esa-partitions-check/parts/calibration.parquet",
+      "sha256": "535263e23c09aa7db06fcd7577b6a75a37079610c29b1a0fcbda3a81f1b61aee"
+    },
+    "evaluation": {
+      "path": "/tmp/esa-partitions-check/parts/evaluation_features.parquet",
+      "sha256": "52a60636274cb4d917efce81b1f0ca25862355ae1f7be1bfd60fdd9f590a6fcb"
+    }
+  },
+  "outputs": {
+    "model": {
+      "path": "/tmp/esa-partitions-check/artifacts/catboost_snapshot.cbm",
+      "sha256": "453f27cb3eeb8364c2bf70f841e6a586062b34b47ee1d8dda6778cce22cf627d"
+    },
+    "calibration_scores": {
+      "path": "/tmp/esa-partitions-check/artifacts/calibration_scores.parquet",
+      "sha256": "174d8cbbd00ccd279f892497ba5a7874448b3ef78cd277f9de7b93ca668e9a04"
+    },
+    "evaluation_scores": {
+      "path": "/tmp/esa-partitions-check/artifacts/evaluation_scores.parquet",
+      "sha256": "037907923899bbe12e81691bebc3d82aa8bc65bec4fb0f0e12fdec1caf86269a"
+    }
+  },
+  "events": {
+    "training": 7146,
+    "calibration": 2409,
+    "evaluation": 2387
+  }
+}

@@ -6,7 +6,7 @@ Event-level risk-controlled triage for conjunction data message streams.
 Can a sequential policy reduce manual review of low-final-risk conjunction events while controlling the probability that a high-final-calculated-risk event is ever assigned `SAFE-EXCLUDE` during the 2–7 day decision window?
 
 ## Status
-Development-only research prototype. Calibration and evaluation partitions remain untouched. Not for operational collision avoidance or maneuver decisions.
+Frozen-policy research prototype with one completed confirmation run. Not for operational collision avoidance or maneuver decisions.
 
 ## Decisions
 - `SAFE-EXCLUDE`: no current manual review; routine automated ingestion continues.
@@ -14,7 +14,9 @@ Development-only research prototype. Calibration and evaluation partitions remai
 - `ESCALATE`: manual analysis required.
 
 ## Current evidence
-Current risk, logistic snapshot, CatBoost snapshot, and CatBoost dynamic scores were compared on identical event-level out-of-fold splits. CatBoost snapshot currently leads at the strict end of the development frontier.
+Current risk, logistic snapshot, CatBoost snapshot, and CatBoost dynamic scores were compared on identical event-level out-of-fold splits. CatBoost snapshot led at the strict end of the development frontier.
+
+The single locked evaluation run observed 4/73 dangerous exclusions (5.48%; one-sided 95% upper bound 12.10%), 70.64% SAFE-EXCLUDE coverage among low-final-risk events, and a median first decision time of 5.53 days before TCA. The pre-specified 10% evaluation upper-bound criterion was not met. Immutable run artifacts are in `artifacts/confirmation_v1/`.
 
 The policy module supports two event-level calibration statements:
 - marginal rank calibration for average risk over the random calibration sample;
@@ -22,7 +24,7 @@ The policy module supports two event-level calibration statements:
 
 Development results are in `reports/DEVELOPMENT_REPORT_002_RU.md`, `reports/DEVELOPMENT_NOTES_CALIBRATION.md`, and `reports/DEVELOPMENT_NOTES_ROBUSTNESS.md`.
 
-Subgroup diagnostics cover mission, history length, and entry-message completeness. The three-CDM minimum-history gate is frozen for confirmation and has not been evaluated on the calibration partition.
+Subgroup diagnostics cover mission, history length, and entry-message completeness. The three-CDM minimum-history gate is frozen. PAC calibration on 73 positive events selected rank 3 and threshold 0.002248533976580822; the single evaluation run is complete.
 
 A split-conformal applicability gate is implemented for numeric event features. It blocks `SAFE-EXCLUDE` on non-finite inputs and on events outside the calibrated robust-deviation region. Its false-flag statement is marginal and requires event-level exchangeability; it is not a guarantee under arbitrary distribution shift.
 
@@ -39,13 +41,14 @@ Offline diagnostics now use `eligible_history_count`, which starts when the 2–
 - Stateful three-decision policy and audit log: `src/triage.py`
 - Calibration diagnostics: `python scripts/calibration_diagnostics.py --output reports/calibration.csv`
 - Minimum-history/timing diagnostics: `python scripts/history_gate_diagnostics.py --output reports/history_gate.csv`
-- Train and score frozen snapshot model: `python scripts/train_snapshot.py --training training.parquet --calibration calibration.parquet --evaluation-features evaluation_features.parquet --model artifacts/catboost_snapshot.cbm --calibration-scores artifacts/calibration_scores.parquet --evaluation-scores artifacts/evaluation_scores.parquet --manifest artifacts/snapshot_model.json`
-- Frozen calibration: `python scripts/confirm_policy.py calibrate --scores artifacts/calibration_scores.parquet --output calibration.json`
-- One-shot confirmation: `python scripts/confirm_policy.py confirm --scores artifacts/evaluation_scores.parquet --labels evaluation_labels.parquet --calibration calibration.json --output confirmation.json --lock confirmation.lock`
+- Build frozen event partitions: `python scripts/make_partitions.py --archive data/raw/train_data.zip --output-dir data/processed/partitions --manifest data/processed/partitions.json --expected-sha256 68362fe5629cc80f17291f2d73f733bf4e922675e37b91a8ee79afadb46f3edc`
+- Train and score frozen snapshot model: `python scripts/train_snapshot.py --training data/processed/partitions/training.parquet --calibration data/processed/partitions/calibration.parquet --evaluation-features data/processed/partitions/evaluation_features.parquet --model artifacts/catboost_snapshot.cbm --calibration-scores artifacts/calibration_scores.parquet --evaluation-scores artifacts/evaluation_scores.parquet --manifest artifacts/snapshot_model.json`
+- Frozen calibration: `python scripts/confirm_policy.py calibrate --scores artifacts/calibration_scores.parquet --labels data/processed/partitions/calibration_labels.parquet --output calibration.json`
+- One-shot confirmation: `python scripts/confirm_policy.py confirm --scores artifacts/evaluation_scores.parquet --labels data/processed/partitions/evaluation_labels.parquet --calibration calibration.json --output confirmation.json --lock confirmation.lock`
 - Subgroup diagnostics: `python scripts/robustness_diagnostics.py --group mission_id --output reports/mission.csv`
 - Tests: `pytest -q`
 
-The training command scores evaluation features without loading their outcomes. The confirmation command creates an exclusive lock before loading event-level labels, rejects calibration/evaluation event overlap, verifies the frozen policy, and records input checksums. Keep the lock and result under version control after the first confirmatory run.
+The partition command reproduces the frozen 60/20/20 event split and keeps complete calibration/evaluation label rosters, including events with no CDM in the decision window. The training command scores evaluation features without loading their outcomes. The confirmation command creates an exclusive lock before loading event-level labels, rejects calibration/evaluation event overlap, verifies the frozen policy, and records input checksums. Keep the lock and result under version control after the first confirmatory run.
 
 ## Data
 ESA Collision Avoidance Challenge, DOI: 10.5281/zenodo.4463683, CC BY 4.0. Raw data are not redistributed in this repository.

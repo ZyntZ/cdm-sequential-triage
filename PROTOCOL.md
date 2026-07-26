@@ -30,4 +30,6 @@ The frozen candidate is the CatBoost snapshot score, PAC rank calibration, alpha
 Primary confirmatory metrics are event-level dangerous-exclusion count/rate with a one-sided 95% Clopper-Pearson upper bound, safe-negative rate, and median first SAFE-EXCLUDE time before TCA. The confirmation pass is run once after calibration.
 
 ## Current status
-Freeze-ready pilot. Calibration and evaluation partitions have not been accessed, and no confirmatory result has been produced.
+The frozen policy was calibrated on 73 positive calibration events. PAC rank = 3, threshold = 0.002248533976580822, and the 95% calibration bound is 0.083741 at alpha = 0.10.
+
+The single locked evaluation run produced 4 dangerous exclusions among 73 positive events: observed rate 5.48%, one-sided 95% Clopper-Pearson upper bound 12.10%. The policy assigned SAFE-EXCLUDE to 1,807 of 2,558 negative events (70.64%); median first decision time was 5.53 days before TCA. The pre-specified criterion requiring the evaluation upper bound to be no greater than 10% was not met. No second confirmatory run is permitted.

@@ -1,0 +1,34 @@
+{
+  "policy": {
+    "score_column": "catboost_snapshot",
+    "alpha": 0.1,
+    "confidence": 0.95,
+    "calibration_mode": "pac",
+    "minimum_history": 3,
+    "min_days_to_tca": 2.0,
+    "max_days_to_tca": 7.0
+  },
+  "evaluation": {
+    "threshold": 0.002248533976580822,
+    "minimum_history": 3,
+    "danger_k": 4,
+    "danger_n": 73,
+    "danger_rate": 0.0547945205479452,
+    "danger_ucb": 0.12101499810942579,
+    "safe_negative": 1807,
+    "negative_n": 2558,
+    "safe_negative_rate": 0.7064112587959344,
+    "median_first_safe_tca": 5.525016203703704
+  },
+  "evaluation_events": 2631,
+  "evaluation_event_ids_sha256": "74a622100f691844557f6968a94af30c739bb6b192e3e9c12249e389fe0e3a49",
+  "started_at_utc": "2026-07-26T15:50:37.986520+00:00",
+  "calibration_artifact": "/tmp/esa-partitions-check/artifacts/calibration.json",
+  "calibration_artifact_sha256": "02675bd8f44f93605c706c0dbf1d62e4524fdee3da4bd4a129b037d8ebca8961",
+  "evaluation_scores": "/tmp/esa-partitions-check/artifacts/evaluation_scores.parquet",
+  "evaluation_scores_sha256": "037907923899bbe12e81691bebc3d82aa8bc65bec4fb0f0e12fdec1caf86269a",
+  "evaluation_labels": "/tmp/esa-partitions-check/parts/evaluation_labels.parquet",
+  "evaluation_labels_sha256": "7e85964041541bf93e0ba2f40e00201ac51aa1cfbb47cc9cb0f4063c1962f1b0",
+  "output": "/tmp/esa-partitions-check/artifacts/confirmation.json",
+  "completed_at_utc": "2026-07-26T15:50:38.096133+00:00"
+}

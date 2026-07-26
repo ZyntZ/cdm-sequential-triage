@@ -1,0 +1,67 @@
+{
+  "created_at_utc": "2026-07-26T15:48:44.342332+00:00",
+  "source": {
+    "path": "/workspace/cdm-partitions/data/raw/train_data.zip",
+    "sha256": "68362fe5629cc80f17291f2d73f733bf4e922675e37b91a8ee79afadb46f3edc",
+    "rows": 162634,
+    "events": 13154,
+    "positive_events": 365
+  },
+  "expected": {
+    "rows": 162634,
+    "events": 13154,
+    "positive_events": 365
+  },
+  "label": {
+    "definition": "final risk >= -6",
+    "final_row": "minimum time_to_tca per event_id",
+    "risk_threshold": -6.0
+  },
+  "split": {
+    "unit": "event_id",
+    "fractions": {
+      "development": 0.6,
+      "calibration": 0.2,
+      "evaluation": 0.2
+    },
+    "seed_stage1": 24072026,
+    "seed_stage2": 24072027,
+    "stratified_by": "y"
+  },
+  "decision_window_days": [
+    2.0,
+    7.0
+  ],
+  "outputs": {
+    "training": {
+      "path": "/tmp/esa-partitions-check/parts/training.parquet",
+      "sha256": "0a27a6afd44a0b8094b5059c93f648597bcbd4fff0f87e8a90ffd6fa8883b968",
+      "rows": 66592,
+      "events_with_rows": 7146
+    },
+    "calibration": {
+      "path": "/tmp/esa-partitions-check/parts/calibration.parquet",
+      "sha256": "535263e23c09aa7db06fcd7577b6a75a37079610c29b1a0fcbda3a81f1b61aee",
+      "rows": 22691,
+      "events_with_rows": 2409
+    },
+    "calibration_labels": {
+      "path": "/tmp/esa-partitions-check/parts/calibration_labels.parquet",
+      "sha256": "b83b3ccf3032a2094094b2e09c98cd570c0d844adabca8effe6d95b5bb27f35e",
+      "rows": 2631,
+      "events_with_rows": 2631
+    },
+    "evaluation_features": {
+      "path": "/tmp/esa-partitions-check/parts/evaluation_features.parquet",
+      "sha256": "52a60636274cb4d917efce81b1f0ca25862355ae1f7be1bfd60fdd9f590a6fcb",
+      "rows": 22656,
+      "events_with_rows": 2387
+    },
+    "evaluation_labels": {
+      "path": "/tmp/esa-partitions-check/parts/evaluation_labels.parquet",
+      "sha256": "7e85964041541bf93e0ba2f40e00201ac51aa1cfbb47cc9cb0f4063c1962f1b0",
+      "rows": 2631,
+      "events_with_rows": 2631
+    }
+  }
+}

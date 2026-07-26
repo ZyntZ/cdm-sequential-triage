@@ -15,6 +15,7 @@ from snapshot_model import (
     assert_disjoint_splits, event_equal_weights, fit_snapshot_model,
     prepare_snapshot_frame, score_snapshot_model,
 )
+from partitions import event_labels, split_event_ids
 from policy import (
     calibration_rank, calibrate_positive_threshold, cp_upper,
     event_policy_table, evaluate_sequential_policy, evaluate_threshold,
@@ -488,4 +489,50 @@ def test_evaluation_label_join_requires_exact_event_set():
     labels = confirmation_scores(event_offset=100).loc[:, ["event_id", "y"]].drop_duplicates()
     with np.testing.assert_raises(ValueError):
         attach_event_labels(scores, labels.iloc[:-1])
+
+def test_final_event_label_uses_minimum_time_to_tca():
+    frame = pd.DataFrame({
+        "event_id": [1, 1, 2, 2],
+        "time_to_tca": [3.0, 0.5, 4.0, 0.2],
+        "risk": [-4.0, -7.0, -8.0, -5.0],
+    })
+    labels = event_labels(frame).set_index("event_id")
+    assert labels.loc[1, "y"] == 0
+    assert labels.loc[2, "y"] == 1
+
+
+def test_event_split_is_stratified_and_disjoint():
+    labels = pd.DataFrame({
+        "event_id": np.arange(100),
+        "y": np.repeat([0, 1], 50),
+    })
+    splits = split_event_ids(labels)
+    assert [len(splits[name]) for name in ["development", "calibration", "evaluation"]] == [60, 20, 20]
+    assert not splits["development"].intersection(splits["calibration"])
+    assert not splits["development"].intersection(splits["evaluation"])
+    assert not splits["calibration"].intersection(splits["evaluation"])
+    indexed = labels.set_index("event_id")["y"]
+    assert [int(indexed.loc[list(splits[name])].sum()) for name in ["development", "calibration", "evaluation"]] == [30, 10, 10]
+
+
+def test_complete_rosters_keep_events_without_eligible_prefixes():
+    calibration_scores = confirmation_scores()
+    calibration_labels = calibration_scores.loc[:, ["event_id", "y"]].drop_duplicates()
+    calibration_labels = pd.concat([
+        calibration_labels,
+        pd.DataFrame({"event_id": [999], "y": [1]}),
+    ], ignore_index=True)
+    artifact = calibrate(calibration_scores, calibration_labels)
+    assert artifact["calibration_events"] == 43
+    assert artifact["calibration"]["n_positive"] == 41
+
+    evaluation_scores = confirmation_scores(event_offset=100)
+    evaluation_labels = evaluation_scores.loc[:, ["event_id", "y"]].drop_duplicates()
+    evaluation_labels = pd.concat([
+        evaluation_labels,
+        pd.DataFrame({"event_id": [1999], "y": [0]}),
+    ], ignore_index=True)
+    result = evaluate(evaluation_scores, artifact, evaluation_labels)
+    assert result["evaluation_events"] == 43
+    assert result["evaluation"]["negative_n"] == 3
 

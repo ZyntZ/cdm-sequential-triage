@@ -24,8 +24,10 @@ from confirmation import (
 
 def calibration_command(args: argparse.Namespace) -> None:
     prefixes = pd.read_parquet(args.scores)
-    artifact = calibrate(prefixes)
+    labels = pd.read_parquet(args.labels)
+    artifact = calibrate(prefixes, labels)
     artifact["calibration_scores_sha256"] = file_sha256(args.scores)
+    artifact["calibration_labels_sha256"] = file_sha256(args.labels)
     artifact["created_at_utc"] = datetime.now(timezone.utc).isoformat()
     write_json(args.output, artifact)
     rule = artifact["calibration"]
@@ -53,8 +55,11 @@ def confirmation_command(args: argparse.Namespace) -> None:
     acquire_confirmation_lock(args.lock, lock_payload)
     prefix_scores = pd.read_parquet(args.scores)
     event_labels = pd.read_parquet(args.labels)
-    prefixes = attach_event_labels(prefix_scores, event_labels)
-    result = evaluate(prefixes, artifact)
+    prefixes = attach_event_labels(
+        prefix_scores,
+        event_labels.loc[event_labels["event_id"].isin(prefix_scores["event_id"].unique())],
+    )
+    result = evaluate(prefixes, artifact, event_labels)
     result.update(lock_payload)
     result["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
     write_json(args.output, result)
@@ -73,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     calibration = commands.add_parser("calibrate")
     calibration.add_argument("--scores", type=Path, required=True)
+    calibration.add_argument("--labels", type=Path, required=True)
     calibration.add_argument("--output", type=Path, required=True)
     calibration.set_defaults(handler=calibration_command)
 
