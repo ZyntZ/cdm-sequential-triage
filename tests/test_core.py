@@ -7,6 +7,8 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 from history_gate_diagnostics import (
     attach_gate_features, crossfit_shift_gate, nested_gate_roles,
 )
+from event_aligned_diagnostics import attach_event_folds
+from event_aligned_model import positive_tail_weights, prepare_dynamic_frame
 from prefix_features import build_prefix_features, eligible_prefixes
 from robustness import subgroup_metrics
 from shift_gate import ConformalShiftGate
@@ -283,6 +285,48 @@ def test_gate_feature_join_requires_exact_prefix_keys():
 
     with np.testing.assert_raises(ValueError):
         attach_gate_features(scores, features.iloc[:-1], ["gate_feature"])
+
+
+def test_positive_tail_weights_preserve_event_mass_and_focus_hard_positives():
+    frame = pd.DataFrame({
+        "event_id": [1, 1, 1, 1, 2, 2],
+        "y": [1, 1, 1, 1, 0, 0],
+    })
+    scores = np.array([0.10, 0.20, 0.80, 0.90, 0.10, 0.90])
+    weights = positive_tail_weights(
+        frame, scores, hard_fraction=0.25, hard_mass=0.50
+    )
+    totals = pd.Series(weights).groupby(frame["event_id"]).sum()
+
+    np.testing.assert_allclose(totals.to_numpy(), 1.0)
+    assert weights[0] > weights[1]
+    np.testing.assert_allclose(weights[4:], [0.5, 0.5])
+
+
+def test_positive_tail_weights_reject_incomplete_or_in_sample_shape():
+    frame = pd.DataFrame({"event_id": [1, 1], "y": [1, 1]})
+    with np.testing.assert_raises(ValueError):
+        positive_tail_weights(frame, [0.1], hard_fraction=0.25, hard_mass=0.50)
+    with np.testing.assert_raises(ValueError):
+        positive_tail_weights(frame, [0.1, np.nan], hard_fraction=0.25, hard_mass=0.50)
+
+
+def test_event_aligned_fold_join_is_exact():
+    prepared = pd.DataFrame({
+        "event_id": [1, 1, 2],
+        "time_to_tca": [6.0, 5.0, 6.0],
+        "y": [1, 1, 0],
+    })
+    oof = pd.DataFrame({
+        "event_id": [1, 1, 2],
+        "time_to_tca": [6.0, 5.0, 6.0],
+        "fold": [0, 0, 1],
+        "base": [0.2, 0.3, 0.1],
+    })
+    attached = attach_event_folds(prepared, oof)
+    assert attached["fold"].tolist() == [0, 0, 1]
+    with np.testing.assert_raises(ValueError):
+        attach_event_folds(prepared, oof.iloc[:-1])
 
 def test_nested_gate_roles_are_disjoint():
     folds = [0, 1, 2, 3, 4]

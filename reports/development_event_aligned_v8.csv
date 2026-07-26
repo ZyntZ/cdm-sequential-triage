@@ -1,0 +1,2 @@
+method,base_score_for_weights,hard_fraction,hard_mass,minimum_history,alpha,mode,confidence,danger_k,danger_n,danger_rate,danger_ucb,safe_negative,negative_n,safe_negative_rate,median_first_safe_tca_days,rank_min,rank_max,threshold_min,threshold_max,prefix_rows,events
+catboost_tail_aligned,nested_inner_oof_dynamic,0.25,0.5,3,0.1,pac,0.95,12,192,0.0625,0.09929771751247034,5286,6954,0.7601380500431406,5.329607575231482,9,10,0.0010832504260823467,0.0026283993217599898,66592,7146

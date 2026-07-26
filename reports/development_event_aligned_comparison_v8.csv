@@ -1,0 +1,2 @@
+baseline,candidate,danger_baseline,danger_candidate,danger_n,safe_negative_baseline,safe_negative_candidate,negative_n,coverage_delta,coverage_delta_ci_low,coverage_delta_ci_high,gained_events,lost_events,mcnemar_exact_p,median_first_safe_tca_baseline,median_first_safe_tca_candidate
+catboost_snapshot,catboost_tail_aligned,12,12,192,5117,5286,6954,0.024302559677883234,0.017687661777394306,0.031205061834915157,363,194,7.331408863210966e-13,4.977052939814816,5.329607575231482
