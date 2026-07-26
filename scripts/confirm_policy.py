@@ -22,13 +22,43 @@ from confirmation import (
     write_json,
 )
 from shift_gate import ConformalShiftGate
+from study import read_locked_study, validate_label_roster
+
+
+def _study_context(args: argparse.Namespace, cohort: str, labels: pd.DataFrame) -> tuple[dict | None, str | None]:
+    options = (args.study_manifest, args.study_lock)
+    if any(value is not None for value in options):
+        if not all(value is not None for value in options):
+            raise ValueError("--study-manifest and --study-lock must be used together")
+        manifest, digest = read_locked_study(args.study_manifest, args.study_lock)
+        validate_label_roster(labels, manifest, cohort)
+        return manifest, digest
+    return None, None
+
+
+def _validate_scored_study(prefixes: pd.DataFrame, digest: str | None, cohort: str) -> None:
+    if digest is None:
+        return
+    required = {"study_manifest_sha256", "study_cohort"}
+    missing = required.difference(prefixes.columns)
+    if missing:
+        raise ValueError(f"Scores are not bound to the frozen study: {sorted(missing)}")
+    if set(prefixes["study_manifest_sha256"].astype(str).unique()) != {digest}:
+        raise ValueError("Scores reference a different frozen study")
+    if set(prefixes["study_cohort"].astype(str).unique()) != {cohort}:
+        raise ValueError(f"Scores are not from the frozen {cohort} cohort")
 
 
 def calibration_command(args: argparse.Namespace) -> None:
     prefixes = pd.read_parquet(args.scores)
     labels = pd.read_parquet(args.labels)
+    _, study_hash = _study_context(args, "calibration", labels)
+    _validate_scored_study(prefixes, study_hash, "calibration")
     shift_gate = None if args.gate is None else ConformalShiftGate.load(args.gate)
     manifest = None if args.model_manifest is None else read_json(args.model_manifest)
+    if manifest is not None and manifest.get("calibration_required_on_genuinely_new_events") is True:
+        if study_hash is None:
+            raise ValueError("The frozen model requires a locked genuinely new study")
     policy = None if manifest is None else policy_from_model_manifest(manifest)
     artifact = calibrate(prefixes, labels, shift_gate=shift_gate, policy=policy)
     artifact["model_manifest_sha256"] = (
@@ -38,6 +68,13 @@ def calibration_command(args: argparse.Namespace) -> None:
     artifact["calibration_labels_sha256"] = file_sha256(args.labels)
     artifact["shift_gate_file_sha256"] = (
         None if args.gate is None else file_sha256(args.gate)
+    )
+    artifact["study_manifest_sha256"] = study_hash
+    artifact["study_manifest_file_sha256"] = (
+        None if args.study_manifest is None else file_sha256(args.study_manifest)
+    )
+    artifact["study_lock_file_sha256"] = (
+        None if args.study_lock is None else file_sha256(args.study_lock)
     )
     artifact["created_at_utc"] = datetime.now(timezone.utc).isoformat()
     write_json(args.output, artifact)
@@ -53,6 +90,13 @@ def confirmation_command(args: argparse.Namespace) -> None:
     artifact = read_json(args.calibration)
     if args.output.exists():
         raise FileExistsError(f"Confirmation output already exists: {args.output}")
+    study_options = (args.study_manifest, args.study_lock)
+    if any(value is not None for value in study_options):
+        if not all(value is not None for value in study_options):
+            raise ValueError("--study-manifest and --study-lock must be used together")
+        _, study_hash = read_locked_study(args.study_manifest, args.study_lock)
+    else:
+        study_hash = None
     lock_payload = {
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
         "calibration_artifact": str(args.calibration),
@@ -62,6 +106,10 @@ def confirmation_command(args: argparse.Namespace) -> None:
         "evaluation_labels": str(args.labels),
         "evaluation_labels_sha256": file_sha256(args.labels),
         "output": str(args.output),
+        "study_manifest": None if args.study_manifest is None else str(args.study_manifest),
+        "study_manifest_sha256": study_hash,
+        "study_lock": None if args.study_lock is None else str(args.study_lock),
+        "study_lock_file_sha256": None if args.study_lock is None else file_sha256(args.study_lock),
         "shift_gate": None if args.gate is None else str(args.gate),
         "shift_gate_file_sha256": (
             None if args.gate is None else file_sha256(args.gate)
@@ -76,12 +124,20 @@ def confirmation_command(args: argparse.Namespace) -> None:
     acquire_confirmation_lock(args.lock, lock_payload)
     prefix_scores = pd.read_parquet(args.scores)
     event_labels = pd.read_parquet(args.labels)
-    prefixes = attach_event_labels(
-        prefix_scores,
-        event_labels.loc[event_labels["event_id"].isin(prefix_scores["event_id"].unique())],
-    )
+    _, study_hash = _study_context(args, "evaluation", event_labels)
+    _validate_scored_study(prefix_scores, study_hash, "evaluation")
+    if artifact.get("study_manifest_sha256") != study_hash:
+        raise ValueError("Calibration and evaluation do not use the same frozen study")
+    scored_ids = set(prefix_scores["event_id"].astype(str).unique())
+    labels_for_scored_events = event_labels.loc[
+        event_labels["event_id"].astype(str).isin(scored_ids)
+    ]
+    prefixes = attach_event_labels(prefix_scores, labels_for_scored_events)
     shift_gate = None if args.gate is None else ConformalShiftGate.load(args.gate)
     manifest = None if args.model_manifest is None else read_json(args.model_manifest)
+    if manifest is not None and manifest.get("calibration_required_on_genuinely_new_events") is True:
+        if study_hash is None:
+            raise ValueError("The frozen model requires a locked genuinely new study")
     policy = None if manifest is None else policy_from_model_manifest(manifest)
     expected_manifest_hash = artifact.get("model_manifest_sha256")
     supplied_manifest_hash = (
@@ -114,6 +170,8 @@ def build_parser() -> argparse.ArgumentParser:
     calibration.add_argument("--output", type=Path, required=True)
     calibration.add_argument("--gate", type=Path)
     calibration.add_argument("--model-manifest", type=Path)
+    calibration.add_argument("--study-manifest", type=Path)
+    calibration.add_argument("--study-lock", type=Path)
     calibration.set_defaults(handler=calibration_command)
 
     confirmation = commands.add_parser("confirm")
@@ -124,6 +182,8 @@ def build_parser() -> argparse.ArgumentParser:
     confirmation.add_argument("--lock", type=Path, required=True)
     confirmation.add_argument("--gate", type=Path)
     confirmation.add_argument("--model-manifest", type=Path)
+    confirmation.add_argument("--study-manifest", type=Path)
+    confirmation.add_argument("--study-lock", type=Path)
     confirmation.set_defaults(handler=confirmation_command)
     return parser
 

@@ -39,6 +39,9 @@ from snapshot_model import (
     prepare_snapshot_frame, score_snapshot_model,
 )
 from partitions import event_labels, split_event_ids
+from study import (
+    freeze_study, read_locked_study, validate_feature_cohort, validate_label_roster,
+)
 from policy import (
     calibration_rank, calibrate_positive_threshold, cp_upper,
     event_policy_table, evaluate_sequential_policy, evaluate_threshold,
@@ -1051,3 +1054,93 @@ def test_tail_confirmation_requires_the_same_frozen_policy():
     assert result["policy"]["score_column"] == "catboost_tail_aligned"
     with np.testing.assert_raises(ValueError):
         evaluate(evaluation_scores, calibration)
+
+
+def test_freeze_study_locks_disjoint_label_blind_cohorts(tmp_path):
+    calibration_path = tmp_path / "calibration.parquet"
+    evaluation_path = tmp_path / "evaluation.parquet"
+    pd.DataFrame({
+        "event_id": [1, 1, 2], "time_to_tca": [6.0, 5.0, 6.0], "risk": [-8.0, -7.5, -9.0]
+    }).to_parquet(calibration_path, index=False)
+    pd.DataFrame({
+        "event_id": [3, 4], "time_to_tca": [6.0, 6.0], "risk": [-8.0, -9.0]
+    }).to_parquet(evaluation_path, index=False)
+    preregistration = tmp_path / "preregistration.json"
+    preregistration.write_text(json.dumps({"status": "frozen-before-new-data"}) + "\n")
+    import hashlib
+    preregistration_lock = tmp_path / "preregistration.lock"
+    preregistration_lock.write_text(json.dumps({
+        "preregistration_sha256": hashlib.sha256(preregistration.read_bytes()).hexdigest()
+    }) + "\n")
+    manifest_path = tmp_path / "study.json"
+    lock_path = tmp_path / "study.lock"
+
+    manifest = freeze_study(
+        calibration_path, evaluation_path, preregistration, preregistration_lock,
+        manifest_path, lock_path,
+    )
+    locked, digest = read_locked_study(manifest_path, lock_path)
+
+    assert manifest["outcomes_accessed"] is False
+    assert locked["cohorts"]["calibration"]["event_ids"] == ["1", "2"]
+    assert locked["cohorts"]["evaluation"]["event_ids"] == ["3", "4"]
+    assert validate_feature_cohort(
+        calibration_path, manifest_path, lock_path, "calibration"
+    ) == digest
+    with np.testing.assert_raises(FileExistsError):
+        freeze_study(
+            calibration_path, evaluation_path, preregistration, preregistration_lock,
+            manifest_path, lock_path,
+        )
+
+
+def test_freeze_study_rejects_overlap_and_outcome_columns(tmp_path):
+    preregistration = tmp_path / "preregistration.json"
+    preregistration.write_text("{}\n")
+    import hashlib
+    preregistration_lock = tmp_path / "preregistration.lock"
+    preregistration_lock.write_text(json.dumps({
+        "preregistration_sha256": hashlib.sha256(preregistration.read_bytes()).hexdigest()
+    }) + "\n")
+    calibration_path = tmp_path / "calibration.parquet"
+    evaluation_path = tmp_path / "evaluation.parquet"
+    pd.DataFrame({"event_id": [1], "time_to_tca": [6.0]}).to_parquet(calibration_path)
+    pd.DataFrame({"event_id": [1], "time_to_tca": [5.0]}).to_parquet(evaluation_path)
+    with np.testing.assert_raises(ValueError):
+        freeze_study(
+            calibration_path, evaluation_path, preregistration, preregistration_lock,
+            tmp_path / "overlap.json", tmp_path / "overlap.lock",
+        )
+    pd.DataFrame({"event_id": [2], "time_to_tca": [5.0], "y": [0]}).to_parquet(evaluation_path)
+    with np.testing.assert_raises(ValueError):
+        freeze_study(
+            calibration_path, evaluation_path, preregistration, preregistration_lock,
+            tmp_path / "labelled.json", tmp_path / "labelled.lock",
+        )
+
+
+def test_frozen_study_detects_file_and_label_roster_drift(tmp_path):
+    calibration_path = tmp_path / "calibration.parquet"
+    evaluation_path = tmp_path / "evaluation.parquet"
+    pd.DataFrame({"event_id": [1, 2], "time_to_tca": [6.0, 6.0]}).to_parquet(calibration_path)
+    pd.DataFrame({"event_id": [3, 4], "time_to_tca": [6.0, 6.0]}).to_parquet(evaluation_path)
+    preregistration = tmp_path / "preregistration.json"
+    preregistration.write_text("{}\n")
+    import hashlib
+    preregistration_lock = tmp_path / "preregistration.lock"
+    preregistration_lock.write_text(json.dumps({
+        "preregistration_sha256": hashlib.sha256(preregistration.read_bytes()).hexdigest()
+    }) + "\n")
+    manifest_path, lock_path = tmp_path / "study.json", tmp_path / "study.lock"
+    freeze_study(
+        calibration_path, evaluation_path, preregistration, preregistration_lock,
+        manifest_path, lock_path,
+    )
+    manifest, _ = read_locked_study(manifest_path, lock_path)
+    validate_label_roster(pd.DataFrame({"event_id": [1, 2], "y": [0, 1]}), manifest, "calibration")
+    with np.testing.assert_raises(ValueError):
+        validate_label_roster(pd.DataFrame({"event_id": [1], "y": [0]}), manifest, "calibration")
+
+    pd.DataFrame({"event_id": [1, 2], "time_to_tca": [6.0, 5.0]}).to_parquet(calibration_path)
+    with np.testing.assert_raises(ValueError):
+        validate_feature_cohort(calibration_path, manifest_path, lock_path, "calibration")
