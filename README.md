@@ -26,7 +26,7 @@ Subgroup diagnostics cover mission, history length, and entry-message completene
 
 A split-conformal applicability gate is implemented for numeric event features. It blocks `SAFE-EXCLUDE` on non-finite inputs and on events outside the calibrated robust-deviation region. Its false-flag statement is marginal and requires event-level exchangeability; it is not a guarantee under arbitrary distribution shift.
 
-The runtime policy now combines the calibrated lower threshold, minimum-history rule, and applicability gate into the three operational decisions. Every accepted update is recorded with its sequence number, score, gate result, decision, and reason; out-of-order event updates are rejected. The `ESCALATE` threshold is an operational prioritisation setting and is not covered by the dangerous-exclusion guarantee.
+The runtime policy combines the calibrated lower threshold, minimum-history rule, applicability gate, and the calibrated 2–7 day decision window. Updates outside the window remain auditable but cannot receive `SAFE-EXCLUDE`; the minimum-history counter includes only updates inside the window. Every accepted update records its sequence number, eligible-history count, score, gate result, decision, and reason. Out-of-order event updates are rejected. The `ESCALATE` threshold is an operational prioritisation setting and is not covered by the dangerous-exclusion guarantee.
 
 ## Reproducibility
 - Dataset source/checksums: `data/manifest.json`

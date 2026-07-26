@@ -235,3 +235,51 @@ def test_missing_shift_features_fail_safe():
     result = policy.update(1, 5.0, 0.10)
     assert result.decision == Decision.MONITOR
     assert result.reason == "safe_exclude_blocked_by_shift_gate"
+
+
+def test_runtime_safe_exclude_is_limited_to_calibrated_window():
+    policy = SequentialTriagePolicy(safe_threshold=0.20)
+    early = policy.update("event", 8.0, 0.10)
+    opening = policy.update("event", 7.0, 0.10)
+    closing = policy.update("event", 2.0, 0.10)
+    late = policy.update("event", 1.5, 0.10)
+
+    assert [early.decision, opening.decision, closing.decision, late.decision] == [
+        Decision.MONITOR,
+        Decision.SAFE_EXCLUDE,
+        Decision.SAFE_EXCLUDE,
+        Decision.MONITOR,
+    ]
+    assert early.reason == "decision_window_not_open"
+    assert late.reason == "decision_window_closed"
+
+
+def test_minimum_history_counts_only_updates_inside_decision_window():
+    policy = SequentialTriagePolicy(safe_threshold=0.20, minimum_history=3)
+    decisions = [
+        policy.update("event", 9.0, 0.10),
+        policy.update("event", 8.0, 0.10),
+        policy.update("event", 7.0, 0.10),
+        policy.update("event", 6.0, 0.10),
+        policy.update("event", 5.0, 0.10),
+    ]
+
+    assert [item.eligible_history_count for item in decisions] == [0, 0, 1, 2, 3]
+    assert decisions[-2].decision == Decision.MONITOR
+    assert decisions[-1].decision == Decision.SAFE_EXCLUDE
+
+
+def test_runtime_rejects_invalid_decision_window():
+    with np.testing.assert_raises(ValueError):
+        SequentialTriagePolicy(0.20, min_days_to_tca=7.0, max_days_to_tca=2.0)
+
+
+def test_reset_event_resets_eligible_history_count():
+    policy = SequentialTriagePolicy(safe_threshold=0.20, minimum_history=2)
+    policy.update("event", 6.0, 0.10)
+    policy.reset_event("event")
+    restarted = policy.update("event", 6.0, 0.10)
+
+    assert restarted.sequence_number == 1
+    assert restarted.eligible_history_count == 1
+    assert restarted.decision == Decision.MONITOR
