@@ -14,6 +14,9 @@ from event_aligned_robustness import (
 )
 from score_ensemble import combine_scores
 from score_ensemble_diagnostics import evaluate_ensembles
+from repeated_calibration_stability import (
+    repeated_calibration_stability, summarize_stability, validate_oof_scores,
+)
 from prefix_features import build_prefix_features, eligible_prefixes
 from robustness import subgroup_metrics
 from shift_gate import ConformalShiftGate
@@ -401,6 +404,64 @@ def test_score_combinations_reject_nonfinite_and_out_of_range_inputs():
             "catboost_snapshot": [0.1, 1.1],
             "catboost_tail_aligned": [0.2, 0.3],
         }))
+
+
+def test_repeated_calibration_uses_event_level_stratified_halves():
+    rows = []
+    for event_id in range(40):
+        label = int(event_id < 20)
+        for step, time_to_tca in enumerate([6.0, 5.0, 4.0]):
+            snapshot = 0.8 if label else 0.1 + 0.01 * step
+            tail = 0.85 if label else 0.12 + 0.01 * step
+            rows.append({
+                "event_id": event_id,
+                "time_to_tca": time_to_tca,
+                "y": label,
+                "eligible_history_count": step + 1,
+                "catboost_snapshot": snapshot,
+                "catboost_tail_aligned": tail,
+                "minimum": min(snapshot, tail),
+            })
+    detail = repeated_calibration_stability(
+        pd.DataFrame(rows),
+        repeats=3,
+        test_fraction=0.5,
+        seed_base=10,
+        minimum_history=1,
+        alpha=0.30,
+        mode="marginal",
+    )
+    assert len(detail) == 9
+    assert detail["calibration_positives"].eq(10).all()
+    assert detail["danger_n"].eq(10).all()
+    assert detail.groupby("repeat")["seed"].nunique().eq(1).all()
+
+
+def test_repeated_stability_summary_labels_correlated_oof_diagnostics():
+    detail = pd.DataFrame({
+        "method": ["a", "a"], "repeat": [0, 1], "alpha": [0.1, 0.1],
+        "calibration_positives": [10, 10], "danger_rate": [0.0, 0.1],
+        "danger_ucb": [0.05, 0.15], "safe_negative_rate": [0.6, 0.8],
+        "coverage_delta_vs_snapshot": [0.01, -0.01],
+        "danger_delta_vs_snapshot": [0, 1],
+    })
+    result = summarize_stability(detail).iloc[0]
+    assert result["repeats"] == 2
+    assert result["ucb_le_alpha_fraction"] == 0.5
+    assert result["coverage_delta_positive_fraction"] == 0.5
+    assert result["danger_not_worse_fraction"] == 0.5
+
+
+def test_repeated_stability_rejects_nonfinite_scores():
+    frame = pd.DataFrame({
+        "event_id": [1], "time_to_tca": [5.0], "y": [0],
+        "eligible_history_count": [1], "catboost_snapshot": [0.1],
+        "catboost_tail_aligned": [np.nan], "minimum": [0.1],
+    })
+    with np.testing.assert_raises(ValueError):
+        validate_oof_scores(
+            frame, ("catboost_snapshot", "catboost_tail_aligned", "minimum")
+        )
 
 def test_nested_gate_roles_are_disjoint():
     folds = [0, 1, 2, 3, 4]
