@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from confirmation import (
     acquire_confirmation_lock,
+    attach_event_labels,
     calibrate,
     evaluate,
     file_sha256,
@@ -45,10 +46,14 @@ def confirmation_command(args: argparse.Namespace) -> None:
         "calibration_artifact_sha256": file_sha256(args.calibration),
         "evaluation_scores": str(args.scores),
         "evaluation_scores_sha256": file_sha256(args.scores),
+        "evaluation_labels": str(args.labels),
+        "evaluation_labels_sha256": file_sha256(args.labels),
         "output": str(args.output),
     }
     acquire_confirmation_lock(args.lock, lock_payload)
-    prefixes = pd.read_parquet(args.scores)
+    prefix_scores = pd.read_parquet(args.scores)
+    event_labels = pd.read_parquet(args.labels)
+    prefixes = attach_event_labels(prefix_scores, event_labels)
     result = evaluate(prefixes, artifact)
     result.update(lock_payload)
     result["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
@@ -74,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     confirmation = commands.add_parser("confirm")
     confirmation.add_argument("--scores", type=Path, required=True)
     confirmation.add_argument("--calibration", type=Path, required=True)
+    confirmation.add_argument("--labels", type=Path, required=True)
     confirmation.add_argument("--output", type=Path, required=True)
     confirmation.add_argument("--lock", type=Path, required=True)
     confirmation.set_defaults(handler=confirmation_command)

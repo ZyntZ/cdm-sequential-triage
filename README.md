@@ -39,12 +39,13 @@ Offline diagnostics now use `eligible_history_count`, which starts when the 2–
 - Stateful three-decision policy and audit log: `src/triage.py`
 - Calibration diagnostics: `python scripts/calibration_diagnostics.py --output reports/calibration.csv`
 - Minimum-history/timing diagnostics: `python scripts/history_gate_diagnostics.py --output reports/history_gate.csv`
-- Frozen calibration: `python scripts/confirm_policy.py calibrate --scores calibration_scores.parquet --output calibration.json`
-- One-shot confirmation: `python scripts/confirm_policy.py confirm --scores evaluation_scores.parquet --calibration calibration.json --output confirmation.json --lock confirmation.lock`
+- Train and score frozen snapshot model: `python scripts/train_snapshot.py --training training.parquet --calibration calibration.parquet --evaluation-features evaluation_features.parquet --model artifacts/catboost_snapshot.cbm --calibration-scores artifacts/calibration_scores.parquet --evaluation-scores artifacts/evaluation_scores.parquet --manifest artifacts/snapshot_model.json`
+- Frozen calibration: `python scripts/confirm_policy.py calibrate --scores artifacts/calibration_scores.parquet --output calibration.json`
+- One-shot confirmation: `python scripts/confirm_policy.py confirm --scores artifacts/evaluation_scores.parquet --labels evaluation_labels.parquet --calibration calibration.json --output confirmation.json --lock confirmation.lock`
 - Subgroup diagnostics: `python scripts/robustness_diagnostics.py --group mission_id --output reports/mission.csv`
 - Tests: `pytest -q`
 
-The confirmation command rejects calibration/evaluation event overlap, verifies the frozen policy, records input checksums, and creates an exclusive lock before reading evaluation outcomes. Keep the lock and result under version control after the first confirmatory run.
+The training command scores evaluation features without loading their outcomes. The confirmation command creates an exclusive lock before loading event-level labels, rejects calibration/evaluation event overlap, verifies the frozen policy, and records input checksums. Keep the lock and result under version control after the first confirmatory run.
 
 ## Data
 ESA Collision Avoidance Challenge, DOI: 10.5281/zenodo.4463683, CC BY 4.0. Raw data are not redistributed in this repository.

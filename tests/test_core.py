@@ -8,7 +8,12 @@ from robustness import subgroup_metrics
 from shift_gate import ConformalShiftGate
 from triage import Decision, SequentialTriagePolicy
 from confirmation import (
-    POLICY, acquire_confirmation_lock, calibrate, evaluate, prepare_prefix_scores,
+    POLICY, acquire_confirmation_lock, attach_event_labels, calibrate, evaluate,
+    prepare_prefix_scores,
+)
+from snapshot_model import (
+    assert_disjoint_splits, event_equal_weights, fit_snapshot_model,
+    prepare_snapshot_frame, score_snapshot_model,
 )
 from policy import (
     calibration_rank, calibrate_positive_threshold, cp_upper,
@@ -353,6 +358,7 @@ def confirmation_scores(event_offset=0):
                 "time_to_tca": time_to_tca,
                 "y": label,
                 "catboost_snapshot": score,
+                "model_sha256": "test-model-sha256",
             })
     for event_id, values in [(41, [0.20, 0.10, 0.05]), (42, [0.30, 0.20, 0.10])]:
         for time_to_tca, score in zip([7.0, 6.0, 5.0], values):
@@ -361,6 +367,7 @@ def confirmation_scores(event_offset=0):
                 "time_to_tca": time_to_tca,
                 "y": 0,
                 "catboost_snapshot": score,
+                "model_sha256": "test-model-sha256",
             })
     return pd.DataFrame(rows)
 
@@ -404,4 +411,81 @@ def test_frozen_calibration_rejects_too_few_positive_events():
     small = confirmation_scores().query("event_id <= 3 or event_id >= 41")
     with np.testing.assert_raises(ValueError):
         calibrate(small)
+
+def snapshot_training_frame(event_offset=0):
+    rows = []
+    for event_id in range(1, 9):
+        label = int(event_id > 4)
+        for step, time_to_tca in enumerate([7.0, 6.0, 5.0]):
+            rows.append({
+                "event_id": event_id + event_offset,
+                "time_to_tca": time_to_tca,
+                "y": label,
+                "risk": -9.0 + 3.0 * label + 0.1 * step,
+                "max_risk_estimate": -8.0 + 2.0 * label,
+                "max_risk_scaling": 1.0,
+                "miss_distance": 200.0 - 80.0 * label + step,
+                "relative_speed": 10.0 + label,
+                "mahalanobis_distance": 6.0 - 2.0 * label,
+                "t_position_covariance_det": 2.0 + label,
+                "c_position_covariance_det": 3.0 + label,
+                "t_obs_available": 20.0 + step,
+                "t_obs_used": 18.0 + step,
+                "t_weighted_rms": 0.5,
+                "c_obs_available": 15.0 + step,
+                "c_obs_used": 14.0 + step,
+                "c_weighted_rms": 0.6,
+                "mission_id": event_id % 3,
+                "c_object_type": "PAYLOAD" if event_id % 2 else "DEBRIS",
+            })
+    return pd.DataFrame(rows)
+
+
+def test_snapshot_model_scores_required_confirmation_columns():
+    training = snapshot_training_frame()
+    model = fit_snapshot_model(training, {"iterations": 10})
+    scores = score_snapshot_model(model, snapshot_training_frame(100))
+    assert scores.columns.tolist() == [
+        "event_id", "time_to_tca", "y", "catboost_snapshot"
+    ]
+    assert scores["catboost_snapshot"].between(0.0, 1.0).all()
+    assert scores["event_id"].nunique() == 8
+
+
+def test_snapshot_event_weights_sum_to_one_per_event():
+    prepared = prepare_snapshot_frame(snapshot_training_frame())
+    weighted = prepared.assign(weight=event_equal_weights(prepared))
+    totals = weighted.groupby("event_id")["weight"].sum()
+    np.testing.assert_allclose(totals.to_numpy(), 1.0)
+
+
+def test_snapshot_splits_must_be_disjoint():
+    frame = snapshot_training_frame()
+    with np.testing.assert_raises(ValueError):
+        assert_disjoint_splits({"training": frame, "calibration": frame.copy()})
+
+def test_confirmation_rejects_scores_from_different_models():
+    calibration = calibrate(confirmation_scores())
+    evaluation_scores = confirmation_scores(event_offset=100)
+    evaluation_scores["model_sha256"] = "other-model-sha256"
+    with np.testing.assert_raises(ValueError):
+        evaluate(evaluation_scores, calibration)
+
+def test_evaluation_scores_are_label_blind_until_confirmation():
+    training = snapshot_training_frame()
+    model = fit_snapshot_model(training, {"iterations": 10})
+    features = snapshot_training_frame(100).drop(columns="y")
+    scores = score_snapshot_model(model, features, include_labels=False)
+    assert "y" not in scores.columns
+    scores["model_sha256"] = "test-model-sha256"
+    labels = snapshot_training_frame(100).loc[:, ["event_id", "y"]].drop_duplicates()
+    attached = attach_event_labels(scores, labels)
+    assert attached["y"].notna().all()
+
+
+def test_evaluation_label_join_requires_exact_event_set():
+    scores = confirmation_scores(event_offset=100).drop(columns="y")
+    labels = confirmation_scores(event_offset=100).loc[:, ["event_id", "y"]].drop_duplicates()
+    with np.testing.assert_raises(ValueError):
+        attach_event_labels(scores, labels.iloc[:-1])
 

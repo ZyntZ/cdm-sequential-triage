@@ -37,7 +37,7 @@ def event_id_digest(event_ids: pd.Series) -> str:
 
 def prepare_prefix_scores(frame: pd.DataFrame) -> pd.DataFrame:
     score_column = POLICY["score_column"]
-    required = {"event_id", "time_to_tca", "y", score_column}
+    required = {"event_id", "time_to_tca", "y", score_column, "model_sha256"}
     missing = required.difference(frame.columns)
     if missing:
         raise ValueError(f"Missing required columns: {sorted(missing)}")
@@ -54,6 +54,9 @@ def prepare_prefix_scores(frame: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("y must contain only 0 and 1")
     if (selected.groupby("event_id")["y"].nunique() != 1).any():
         raise ValueError("Each event_id must have one event-level label")
+    model_hashes = selected["model_sha256"].dropna().astype(str).unique()
+    if len(model_hashes) != 1 or selected["model_sha256"].isna().any():
+        raise ValueError("Scores must contain exactly one model_sha256")
     selected = selected.sort_values(
         ["event_id", "time_to_tca"], ascending=[True, False]
     )
@@ -62,6 +65,33 @@ def prepare_prefix_scores(frame: pd.DataFrame) -> pd.DataFrame:
     )
     return selected
 
+
+
+def attach_event_labels(
+    prefix_scores: pd.DataFrame, event_labels: pd.DataFrame
+) -> pd.DataFrame:
+    if "y" in prefix_scores.columns:
+        raise ValueError("Evaluation scores must be label-blind")
+    required = {"event_id", "y"}
+    missing = required.difference(event_labels.columns)
+    if missing:
+        raise ValueError(f"Missing evaluation label columns: {sorted(missing)}")
+    labels = event_labels.loc[:, ["event_id", "y"]].drop_duplicates()
+    if labels["event_id"].duplicated().any():
+        raise ValueError("Evaluation labels must contain one row per event_id")
+    if not labels["y"].isin([0, 1]).all():
+        raise ValueError("Evaluation labels must contain only 0 and 1")
+    scored_ids = set(prefix_scores["event_id"].astype(str).unique())
+    label_ids = set(labels["event_id"].astype(str).unique())
+    if scored_ids != label_ids:
+        missing_labels = len(scored_ids.difference(label_ids))
+        extra_labels = len(label_ids.difference(scored_ids))
+        raise ValueError(
+            f"Evaluation label mismatch: {missing_labels} missing and "
+            f"{extra_labels} extra event_id values"
+        )
+    merged = prefix_scores.merge(labels, on="event_id", how="left", validate="many_to_one")
+    return merged
 
 def calibrate(calibration_prefixes: pd.DataFrame) -> dict[str, Any]:
     prepared = prepare_prefix_scores(calibration_prefixes)
@@ -87,6 +117,7 @@ def calibrate(calibration_prefixes: pd.DataFrame) -> dict[str, Any]:
         "calibration_events": int(events.shape[0]),
         "calibration_event_ids": sorted(str(value) for value in events["event_id"]),
         "calibration_event_ids_sha256": event_id_digest(events["event_id"]),
+        "model_sha256": str(prepared["model_sha256"].iloc[0]),
     }
 
 
@@ -99,6 +130,9 @@ def evaluate(
     if threshold is None:
         raise ValueError("Calibration artifact has no threshold")
     prepared = prepare_prefix_scores(evaluation_prefixes)
+    evaluation_model_sha256 = str(prepared["model_sha256"].iloc[0])
+    if calibration_artifact.get("model_sha256") != evaluation_model_sha256:
+        raise ValueError("Calibration and evaluation scores use different models")
     if "calibration_event_ids" not in calibration_artifact:
         raise ValueError("Calibration artifact has no event identifiers")
     calibration_ids = set(calibration_artifact["calibration_event_ids"])
