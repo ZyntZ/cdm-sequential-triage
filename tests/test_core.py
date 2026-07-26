@@ -9,6 +9,9 @@ from history_gate_diagnostics import (
 )
 from event_aligned_diagnostics import attach_event_folds
 from event_aligned_model import positive_tail_weights, prepare_dynamic_frame
+from event_aligned_robustness import (
+    attach_candidate_scores, event_groups, paired_subgroup_table,
+)
 from prefix_features import build_prefix_features, eligible_prefixes
 from robustness import subgroup_metrics
 from shift_gate import ConformalShiftGate
@@ -327,6 +330,48 @@ def test_event_aligned_fold_join_is_exact():
     assert attached["fold"].tolist() == [0, 0, 1]
     with np.testing.assert_raises(ValueError):
         attach_event_folds(prepared, oof.iloc[:-1])
+
+
+def test_event_aligned_score_join_rejects_fold_mismatch():
+    baseline = pd.DataFrame({
+        "event_id": [1, 2], "time_to_tca": [6.0, 6.0],
+        "y": [1, 0], "fold": [0, 1], "catboost_snapshot": [0.8, 0.1],
+    })
+    candidate = pd.DataFrame({
+        "event_id": [1, 2], "time_to_tca": [6.0, 6.0],
+        "y": [1, 0], "fold": [0, 2], "eligible_history_count": [1, 1],
+        "catboost_tail_aligned": [0.9, 0.2],
+    })
+    with np.testing.assert_raises(ValueError):
+        attach_candidate_scores(baseline, candidate)
+
+
+def test_event_groups_use_window_history_and_first_message_missingness():
+    frame = pd.DataFrame({
+        "event_id": [1, 1, 2], "time_to_tca": [6.0, 5.0, 6.0],
+        "mission_id": [3, 3, 4], "feature": [np.nan, 1.0, 2.0],
+    })
+    groups = event_groups(frame).set_index("event_id")
+    assert groups.loc[1, "messages_in_window"] == 2
+    assert groups.loc[1, "history_group"] == "1-4"
+    assert groups.loc[1, "missingness_group"] == "high"
+    assert groups.loc[2, "missingness_group"] == "none"
+
+
+def test_paired_subgroup_table_reports_directional_changes():
+    paired = pd.DataFrame({
+        "event_id": [1, 2, 3, 4], "y": [0, 0, 1, 1], "group": ["a"] * 4,
+        "safe_exclude_baseline": [False, True, False, True],
+        "safe_exclude_candidate": [True, True, True, False],
+        "first_safe_tca_baseline": [np.nan, 4.0, np.nan, 4.0],
+        "first_safe_tca_candidate": [5.0, 5.0, 3.0, np.nan],
+    })
+    result = paired_subgroup_table(paired, "group", confidence=0.95).iloc[0]
+    assert result["coverage_gained_events"] == 1
+    assert result["coverage_lost_events"] == 0
+    assert result["danger_gained_events"] == 1
+    assert result["danger_lost_events"] == 1
+    assert result["median_timing_delta_days"] == 1.0
 
 def test_nested_gate_roles_are_disjoint():
     folds = [0, 1, 2, 3, 4]
