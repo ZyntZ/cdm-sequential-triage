@@ -1,4 +1,5 @@
 import sys
+import json
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -18,6 +19,7 @@ from repeated_calibration_stability import (
     repeated_calibration_stability, summarize_stability, validate_oof_scores,
 )
 from freeze_next_validation import freeze_plan
+from train_final_tail_aligned import read_locked_candidate
 from validation_plan import (
     evaluation_planning_table, maximum_passing_failures,
     minimum_positive_events, pass_probability,
@@ -501,6 +503,48 @@ def test_freeze_next_validation_creates_immutable_lock(tmp_path):
     assert output.exists() and lock.exists() and planning.exists()
     with np.testing.assert_raises(FileExistsError):
         freeze_plan([terminal], output, lock, planning)
+
+
+def test_final_trainer_requires_matching_preregistration_lock(tmp_path):
+    preregistration = tmp_path / "preregistration.json"
+    preregistration.write_text(json.dumps({
+        "status": "frozen-before-new-data",
+        "evaluation_accessed": False,
+        "candidate": {
+            "score": "catboost_tail_aligned",
+            "model": "two-stage CatBoost with nested inner-OOF positive-tail weights",
+            "hard_fraction": 0.25,
+            "hard_mass": 0.50,
+            "iterations": 500,
+        },
+    }) + "\n")
+    import hashlib
+    digest = hashlib.sha256(preregistration.read_bytes()).hexdigest()
+    lock = tmp_path / "preregistration.lock"
+    lock.write_text(json.dumps({"preregistration_sha256": digest}) + "\n")
+    candidate, actual = read_locked_candidate(preregistration, lock)
+    assert candidate["score"] == "catboost_tail_aligned"
+    assert actual == digest
+
+    lock.write_text(json.dumps({"preregistration_sha256": "0" * 64}) + "\n")
+    with np.testing.assert_raises(ValueError):
+        read_locked_candidate(preregistration, lock)
+
+
+def test_final_trainer_rejects_changed_candidate(tmp_path):
+    preregistration = tmp_path / "preregistration.json"
+    preregistration.write_text(json.dumps({
+        "status": "frozen-before-new-data",
+        "evaluation_accessed": False,
+        "candidate": {"score": "different", "model": "different"},
+    }) + "\n")
+    import hashlib
+    lock = tmp_path / "preregistration.lock"
+    lock.write_text(json.dumps({
+        "preregistration_sha256": hashlib.sha256(preregistration.read_bytes()).hexdigest()
+    }) + "\n")
+    with np.testing.assert_raises(ValueError):
+        read_locked_candidate(preregistration, lock)
 
 def test_nested_gate_roles_are_disjoint():
     folds = [0, 1, 2, 3, 4]

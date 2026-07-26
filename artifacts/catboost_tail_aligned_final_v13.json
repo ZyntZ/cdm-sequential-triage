@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "created_at_utc": "2026-07-26T21:56:49.807459+00:00",
+  "status": "preregistration-locked-development-fit",
+  "score_column": "catboost_tail_aligned",
+  "preregistration": {
+    "path": "/workspace/cdm-sequential-triage/artifacts/next_validation_preregistration_v12.json",
+    "sha256": "de0989e07742bed934f1e02ce3c256583e1f94486bfd173bf291f7c1cf391596",
+    "lock_path": "/workspace/cdm-sequential-triage/artifacts/next_validation_preregistration_v12.lock",
+    "lock_sha256": "818b34bac8bb17b240e71fc71c5392cb295a83c8f1f659c0b0e34d6a2b8129b7"
+  },
+  "candidate": {
+    "score": "catboost_tail_aligned",
+    "model": "two-stage CatBoost with nested inner-OOF positive-tail weights",
+    "hard_fraction": 0.25,
+    "hard_mass": 0.5,
+    "iterations": 500,
+    "decision_window_days": [
+      2.0,
+      7.0
+    ],
+    "minimum_history": 3,
+    "calibration_mode": "pac",
+    "alpha": 0.1,
+    "calibration_confidence": 0.95,
+    "evaluation_confidence": 0.95,
+    "label": "final log10(Pc) >= -6",
+    "primary_error": "any SAFE-EXCLUDE during the eligible event trajectory given Y=1"
+  },
+  "model_params": {
+    "iterations": 500,
+    "depth": 6,
+    "learning_rate": 0.05,
+    "loss_function": "Logloss",
+    "random_seed": 24072026,
+    "thread_count": 1,
+    "verbose": false,
+    "allow_writing_files": false
+  },
+  "features": [
+    "time_to_tca",
+    "risk",
+    "max_risk_estimate",
+    "max_risk_scaling",
+    "miss_distance",
+    "relative_speed",
+    "mahalanobis_distance",
+    "t_position_covariance_det",
+    "c_position_covariance_det",
+    "t_obs_available",
+    "t_obs_used",
+    "t_weighted_rms",
+    "c_obs_available",
+    "c_obs_used",
+    "c_weighted_rms",
+    "risk_first",
+    "risk_min",
+    "risk_max",
+    "risk_range",
+    "risk_delta_first",
+    "risk_delta_prev",
+    "max_risk_estimate_first",
+    "max_risk_estimate_min",
+    "max_risk_estimate_max",
+    "max_risk_estimate_range",
+    "max_risk_estimate_delta_first",
+    "max_risk_estimate_delta_prev",
+    "miss_distance_first",
+    "miss_distance_min",
+    "miss_distance_max",
+    "miss_distance_range",
+    "miss_distance_delta_first",
+    "miss_distance_delta_prev",
+    "mahalanobis_distance_first",
+    "mahalanobis_distance_min",
+    "mahalanobis_distance_max",
+    "mahalanobis_distance_range",
+    "mahalanobis_distance_delta_first",
+    "mahalanobis_distance_delta_prev",
+    "n_cdm_so_far",
+    "dt_prev",
+    "history_span_days",
+    "eligible_history_count",
+    "mission_id",
+    "c_object_type"
+  ],
+  "training_method": {
+    "base_scores": "fresh five-fold inner-OOF dynamic CatBoost scores",
+    "tail_weights": "positive events only; total weight one per event",
+    "final_fit": "all development events"
+  },
+  "inputs": {
+    "training": {
+      "path": "/workspace/training.parquet",
+      "sha256": "0a27a6afd44a0b8094b5059c93f648597bcbd4fff0f87e8a90ffd6fa8883b968",
+      "prefix_rows": 66592,
+      "events": 7146,
+      "positive_events": 192
+    },
+    "fold_table": {
+      "path": "/workspace/development_oof_model_comparison_v2.parquet",
+      "sha256": "40f2ad2dfd1760add6ac231e90a15e35f8ffe9ab0a5e7808d7a3ed221732a0aa",
+      "folds": 5
+    }
+  },
+  "outputs": {
+    "model": {
+      "path": "/workspace/cdm-sequential-triage/artifacts/catboost_tail_aligned_final_v13.cbm",
+      "sha256": "9607c64be397229a9814131d5011e80a7df28d62a51abe514e8b7814e6d67e72"
+    }
+  },
+  "calibration_accessed": false,
+  "evaluation_accessed": false,
+  "threshold": null,
+  "calibration_required_on_genuinely_new_events": true,
+  "elapsed_seconds_final_fit": 51.199615
+}
