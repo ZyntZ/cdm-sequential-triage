@@ -7,6 +7,9 @@ from prefix_features import build_prefix_features, eligible_prefixes
 from robustness import subgroup_metrics
 from shift_gate import ConformalShiftGate
 from triage import Decision, SequentialTriagePolicy
+from confirmation import (
+    POLICY, acquire_confirmation_lock, calibrate, evaluate, prepare_prefix_scores,
+)
 from policy import (
     calibration_rank, calibrate_positive_threshold, cp_upper,
     event_policy_table, evaluate_sequential_policy, evaluate_threshold,
@@ -337,3 +340,68 @@ def test_reset_event_resets_eligible_history_count():
     assert restarted.sequence_number == 1
     assert restarted.eligible_history_count == 1
     assert restarted.decision == Decision.MONITOR
+
+def confirmation_scores(event_offset=0):
+    rows = []
+    for event_id in range(1, 41):
+        label = 1
+        base = 0.30 + event_id / 1000
+        values = [base + 0.02, base + 0.01, base]
+        for time_to_tca, score in zip([7.0, 6.0, 5.0], values):
+            rows.append({
+                "event_id": event_id + event_offset,
+                "time_to_tca": time_to_tca,
+                "y": label,
+                "catboost_snapshot": score,
+            })
+    for event_id, values in [(41, [0.20, 0.10, 0.05]), (42, [0.30, 0.20, 0.10])]:
+        for time_to_tca, score in zip([7.0, 6.0, 5.0], values):
+            rows.append({
+                "event_id": event_id + event_offset,
+                "time_to_tca": time_to_tca,
+                "y": 0,
+                "catboost_snapshot": score,
+            })
+    return pd.DataFrame(rows)
+
+def test_frozen_calibration_and_confirmation_are_disjoint():
+    calibration = calibrate(confirmation_scores())
+    assert calibration["policy"] == POLICY
+    assert calibration["calibration"]["n_positive"] == 40
+
+    result = evaluate(confirmation_scores(event_offset=100), calibration)
+    assert result["evaluation_events"] == 42
+    assert result["evaluation"]["danger_n"] == 40
+    assert result["evaluation"]["negative_n"] == 2
+
+
+def test_confirmation_rejects_event_overlap():
+    calibration = calibrate(confirmation_scores())
+    with np.testing.assert_raises(ValueError):
+        evaluate(confirmation_scores(), calibration)
+
+
+def test_confirmation_rejects_policy_drift():
+    calibration = calibrate(confirmation_scores())
+    calibration["policy"]["minimum_history"] = 1
+    with np.testing.assert_raises(ValueError):
+        evaluate(confirmation_scores(event_offset=100), calibration)
+
+
+def test_confirmation_window_counter_is_recomputed():
+    frame = confirmation_scores()
+    frame["eligible_history_count"] = 99
+    prepared = prepare_prefix_scores(frame)
+    assert prepared.query("event_id == 1")["eligible_history_count"].tolist() == [1, 2, 3]
+
+def test_confirmation_lock_cannot_be_reused(tmp_path):
+    lock = tmp_path / "confirmation.lock"
+    acquire_confirmation_lock(lock, {"run": 1})
+    with np.testing.assert_raises(RuntimeError):
+        acquire_confirmation_lock(lock, {"run": 2})
+
+def test_frozen_calibration_rejects_too_few_positive_events():
+    small = confirmation_scores().query("event_id <= 3 or event_id >= 41")
+    with np.testing.assert_raises(ValueError):
+        calibrate(small)
+

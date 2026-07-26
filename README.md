@@ -22,7 +22,7 @@ The policy module supports two event-level calibration statements:
 
 Development results are in `reports/DEVELOPMENT_REPORT_002_RU.md`, `reports/DEVELOPMENT_NOTES_CALIBRATION.md`, and `reports/DEVELOPMENT_NOTES_ROBUSTNESS.md`.
 
-Subgroup diagnostics cover mission, history length, and entry-message completeness. A three-CDM minimum-history gate remains a development candidate; it has not been frozen or evaluated on the calibration partition.
+Subgroup diagnostics cover mission, history length, and entry-message completeness. The three-CDM minimum-history gate is frozen for confirmation and has not been evaluated on the calibration partition.
 
 A split-conformal applicability gate is implemented for numeric event features. It blocks `SAFE-EXCLUDE` on non-finite inputs and on events outside the calibrated robust-deviation region. Its false-flag statement is marginal and requires event-level exchangeability; it is not a guarantee under arbitrary distribution shift.
 
@@ -39,8 +39,12 @@ Offline diagnostics now use `eligible_history_count`, which starts when the 2–
 - Stateful three-decision policy and audit log: `src/triage.py`
 - Calibration diagnostics: `python scripts/calibration_diagnostics.py --output reports/calibration.csv`
 - Minimum-history/timing diagnostics: `python scripts/history_gate_diagnostics.py --output reports/history_gate.csv`
+- Frozen calibration: `python scripts/confirm_policy.py calibrate --scores calibration_scores.parquet --output calibration.json`
+- One-shot confirmation: `python scripts/confirm_policy.py confirm --scores evaluation_scores.parquet --calibration calibration.json --output confirmation.json --lock confirmation.lock`
 - Subgroup diagnostics: `python scripts/robustness_diagnostics.py --group mission_id --output reports/mission.csv`
 - Tests: `pytest -q`
+
+The confirmation command rejects calibration/evaluation event overlap, verifies the frozen policy, records input checksums, and creates an exclusive lock before reading evaluation outcomes. Keep the lock and result under version control after the first confirmatory run.
 
 ## Data
 ESA Collision Avoidance Challenge, DOI: 10.5281/zenodo.4463683, CC BY 4.0. Raw data are not redistributed in this repository.
