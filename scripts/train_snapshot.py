@@ -12,6 +12,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from shift_gate import ConformalShiftGate
 from snapshot_model import (
     CATEGORICAL_FEATURES,
     MAX_DAYS_TO_TCA,
@@ -21,6 +22,7 @@ from snapshot_model import (
     assert_disjoint_splits,
     file_sha256,
     fit_snapshot_model,
+    prepare_snapshot_frame,
     score_snapshot_model,
 )
 
@@ -41,6 +43,14 @@ def main() -> None:
     parser.add_argument("--calibration-scores", type=Path, required=True)
     parser.add_argument("--evaluation-scores", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument(
+        "--gate-features",
+        nargs="*",
+        default=[],
+        help="Numeric model inputs used by the applicability gate",
+    )
+    parser.add_argument("--gate-output", type=Path)
+    parser.add_argument("--gate-alpha", type=float, default=0.05)
     args = parser.parse_args()
 
     frames = {
@@ -49,21 +59,36 @@ def main() -> None:
         "evaluation": pd.read_parquet(args.evaluation_features),
     }
     assert_disjoint_splits(frames)
+    if bool(args.gate_features) != (args.gate_output is not None):
+        raise ValueError("--gate-features and --gate-output must be provided together")
     model = fit_snapshot_model(frames["training"])
 
     args.model.parent.mkdir(parents=True, exist_ok=True)
     model.save_model(args.model)
     model_sha256 = file_sha256(args.model)
-    calibration_scores = score_snapshot_model(model, frames["calibration"]).assign(
-        model_sha256=model_sha256
-    )
+    calibration_scores = score_snapshot_model(
+        model,
+        frames["calibration"],
+        passthrough_columns=args.gate_features,
+    ).assign(model_sha256=model_sha256)
     evaluation_scores = score_snapshot_model(
-        model, frames["evaluation"], include_labels=False
+        model,
+        frames["evaluation"],
+        include_labels=False,
+        passthrough_columns=args.gate_features,
     ).assign(model_sha256=model_sha256)
     args.calibration_scores.parent.mkdir(parents=True, exist_ok=True)
     args.evaluation_scores.parent.mkdir(parents=True, exist_ok=True)
     calibration_scores.to_parquet(args.calibration_scores, index=False)
     evaluation_scores.to_parquet(args.evaluation_scores, index=False)
+
+    shift_gate = None
+    if args.gate_features:
+        gate_training = prepare_snapshot_frame(frames["training"])
+        gate_calibration = prepare_snapshot_frame(frames["calibration"])
+        shift_gate = ConformalShiftGate(args.gate_features).fit(gate_training)
+        shift_gate.calibrate_events(gate_calibration, alpha=args.gate_alpha)
+        shift_gate.save(args.gate_output)
 
     manifest = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -73,6 +98,14 @@ def main() -> None:
         "categorical_features": list(CATEGORICAL_FEATURES),
         "window_days": [MIN_DAYS_TO_TCA, MAX_DAYS_TO_TCA],
         "prefix_weighting": "equal total weight per event",
+        "gate_features_in_score_files": list(args.gate_features),
+        "shift_gate": None if shift_gate is None else {
+            "path": str(args.gate_output),
+            "sha256": file_sha256(args.gate_output),
+            "fingerprint": shift_gate.fingerprint(),
+            "alpha": args.gate_alpha,
+            "calibration_unit": "maximum nonconformity over complete event history",
+        },
         "inputs": {
             name: {"path": str(path), "sha256": file_sha256(path)}
             for name, path in {

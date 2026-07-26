@@ -10,6 +10,7 @@ from typing import Any
 import pandas as pd
 
 from policy import calibrate_positive_threshold, cp_upper, first_safe_decision_table, history_gated_event_table
+from shift_gate import ConformalShiftGate
 
 POLICY = {
     "score_column": "catboost_snapshot",
@@ -101,13 +102,35 @@ def attach_event_labels(
 def calibrate(
     calibration_prefixes: pd.DataFrame,
     calibration_labels: pd.DataFrame | None = None,
+    shift_gate: ConformalShiftGate | None = None,
 ) -> dict[str, Any]:
     prepared = prepare_prefix_scores(calibration_prefixes)
-    scored_events = history_gated_event_table(
-        prepared,
-        POLICY["score_column"],
-        minimum_history=POLICY["minimum_history"],
-    )
+    if shift_gate is None:
+        scored_events = history_gated_event_table(
+            prepared,
+            POLICY["score_column"],
+            minimum_history=POLICY["minimum_history"],
+        )
+    else:
+        decisions = first_safe_decision_table(
+            prepared,
+            POLICY["score_column"],
+            threshold=float("inf"),
+            minimum_history=POLICY["minimum_history"],
+            shift_gate=shift_gate,
+        )
+        scored_events = decisions.loc[:, ["event_id", "y"]].copy()
+        permitted = prepared.loc[
+            prepared["eligible_history_count"] >= POLICY["minimum_history"]
+        ].copy()
+        permitted = permitted.loc[shift_gate.allows_safe_exclude(permitted)]
+        minima = permitted.groupby("event_id", as_index=False).agg(
+            min_score=(POLICY["score_column"], "min")
+        )
+        scored_events = scored_events.merge(
+            minima, on="event_id", how="left", validate="one_to_one"
+        )
+        scored_events["min_score"] = scored_events["min_score"].fillna(float("inf"))
     if calibration_labels is None:
         labels = scored_events.loc[:, ["event_id", "y"]]
     else:
@@ -137,18 +160,24 @@ def calibrate(
         "calibration_event_ids": sorted(str(value) for value in labels["event_id"]),
         "calibration_event_ids_sha256": event_id_digest(labels["event_id"]),
         "model_sha256": str(prepared["model_sha256"].iloc[0]),
+        "shift_gate_sha256": None if shift_gate is None else shift_gate.fingerprint(),
     }
 
 def evaluate(
     evaluation_prefixes: pd.DataFrame,
     calibration_artifact: dict[str, Any],
     evaluation_labels: pd.DataFrame | None = None,
+    shift_gate: ConformalShiftGate | None = None,
 ) -> dict[str, Any]:
     if calibration_artifact.get("policy") != POLICY:
         raise ValueError("Calibration artifact does not match the frozen policy")
     threshold = calibration_artifact.get("calibration", {}).get("threshold")
     if threshold is None:
         raise ValueError("Calibration artifact has no threshold")
+    expected_gate_hash = calibration_artifact.get("shift_gate_sha256")
+    supplied_gate_hash = None if shift_gate is None else shift_gate.fingerprint()
+    if expected_gate_hash != supplied_gate_hash:
+        raise ValueError("Calibration artifact and supplied shift gate do not match")
     prepared = prepare_prefix_scores(evaluation_prefixes)
     evaluation_model_sha256 = str(prepared["model_sha256"].iloc[0])
     if calibration_artifact.get("model_sha256") != evaluation_model_sha256:
@@ -169,7 +198,11 @@ def evaluate(
             f"Calibration and evaluation overlap by {len(overlap)} event_id values"
         )
     decisions = first_safe_decision_table(
-        prepared, POLICY["score_column"], float(threshold), POLICY["minimum_history"]
+        prepared,
+        POLICY["score_column"],
+        float(threshold),
+        POLICY["minimum_history"],
+        shift_gate=shift_gate,
     ).drop(columns="y")
     events = labels.merge(decisions, on="event_id", how="left", validate="one_to_one")
     events["safe_exclude"] = events["safe_exclude"].eq(True)
@@ -190,6 +223,13 @@ def evaluate(
         "safe_negative": int(safe_negative.sum()),
         "negative_n": negative_n,
         "safe_negative_rate": float(safe_negative.sum() / negative_n),
+        "shift_gate_blocked_events": int(events["shift_gate_blocked"].eq(True).sum()),
+        "shift_gate_blocked_positive": int(
+            (events["shift_gate_blocked"].eq(True) & positive).sum()
+        ),
+        "shift_gate_blocked_negative": int(
+            (events["shift_gate_blocked"].eq(True) & negative).sum()
+        ),
         "median_first_safe_tca": None if first_safe.empty else float(first_safe.median()),
     }
     return {

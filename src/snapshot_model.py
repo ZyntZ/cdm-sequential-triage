@@ -119,9 +119,18 @@ def fit_snapshot_model(
 
 
 def score_snapshot_model(
-    model: CatBoostClassifier, frame: pd.DataFrame, include_labels: bool = True
+    model: CatBoostClassifier,
+    frame: pd.DataFrame,
+    include_labels: bool = True,
+    passthrough_columns: tuple[str, ...] | list[str] = (),
 ) -> pd.DataFrame:
     prepared = prepare_snapshot_frame(frame, require_labels=include_labels)
+    passthrough = tuple(passthrough_columns)
+    unknown = set(passthrough).difference(NUMERIC_FEATURES + CATEGORICAL_FEATURES)
+    if unknown:
+        raise ValueError(f"Unknown passthrough columns: {sorted(unknown)}")
+    if len(set(passthrough)) != len(passthrough):
+        raise ValueError("passthrough_columns must be unique")
     features = list(NUMERIC_FEATURES + CATEGORICAL_FEATURES)
     scores = model.predict_proba(prepared[features])[:, 1]
     if not np.isfinite(scores).all():
@@ -129,6 +138,7 @@ def score_snapshot_model(
     columns = ["event_id", "time_to_tca"]
     if include_labels:
         columns.append("y")
+    columns.extend(column for column in passthrough if column not in columns)
     return prepared.loc[:, columns].assign(catboost_snapshot=scores)
 
 

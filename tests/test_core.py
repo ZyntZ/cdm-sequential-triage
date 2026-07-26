@@ -260,6 +260,52 @@ def test_offline_shift_gate_blocks_all_threshold_crossings_with_missing_features
     assert result["shift_gate_blocked_negative"] == 1
     assert result["shift_gate_blocked_positive"] == 0
 
+
+def test_shift_gate_event_calibration_uses_complete_event_paths():
+    proper = pd.DataFrame({"gate_feature": np.linspace(0.0, 1.0, 20)})
+    calibration = pd.DataFrame({
+        "event_id": np.repeat(np.arange(20), 2),
+        "gate_feature": np.tile([0.25, 0.75], 20),
+    })
+    gate = ConformalShiftGate(["gate_feature"]).fit(proper)
+    result = gate.calibrate_events(calibration, alpha=0.10)
+
+    assert result.n_calibration == 20
+    assert result.rank == 19
+    assert result.marginal_flag_bound <= 0.10
+
+
+def test_shift_gate_round_trip_preserves_decisions_and_fingerprint(tmp_path):
+    proper = pd.DataFrame({"gate_feature": np.linspace(0.0, 1.0, 20)})
+    calibration = pd.DataFrame({
+        "event_id": np.repeat(np.arange(20), 2),
+        "gate_feature": np.tile([0.25, 0.75], 20),
+    })
+    gate = ConformalShiftGate(["gate_feature"]).fit(proper)
+    gate.calibrate_events(calibration, alpha=0.10)
+    path = tmp_path / "shift_gate.json"
+    gate.save(path)
+    restored = ConformalShiftGate.load(path)
+    probe = pd.DataFrame({"gate_feature": [0.5, 20.0, np.nan]})
+
+    assert restored.fingerprint() == gate.fingerprint()
+    assert restored.allows_safe_exclude(probe).tolist() == gate.allows_safe_exclude(probe).tolist()
+
+
+def test_confirmation_requires_matching_shift_gate():
+    proper = confirmation_scores().query("event_id <= 20")
+    gate_calibration = confirmation_scores().query("event_id > 20")
+    gate = ConformalShiftGate(["gate_feature"]).fit(proper)
+    gate.calibrate_events(gate_calibration, alpha=0.10)
+    calibration = calibrate(confirmation_scores(), shift_gate=gate)
+
+    with np.testing.assert_raises(ValueError):
+        evaluate(confirmation_scores(event_offset=100), calibration)
+    result = evaluate(
+        confirmation_scores(event_offset=100), calibration, shift_gate=gate
+    )
+    assert result["evaluation"]["shift_gate_blocked_events"] >= 0
+
 def test_shift_gate_calibration_and_blocking():
     proper = pd.DataFrame({
         "risk": [-9.0, -8.5, -8.0, -7.5, -7.0],
@@ -415,6 +461,7 @@ def confirmation_scores(event_offset=0):
                 "y": label,
                 "catboost_snapshot": score,
                 "model_sha256": "test-model-sha256",
+                "gate_feature": score,
             })
     for event_id, values in [(41, [0.20, 0.10, 0.05]), (42, [0.30, 0.20, 0.10])]:
         for time_to_tca, score in zip([7.0, 6.0, 5.0], values):
@@ -424,6 +471,7 @@ def confirmation_scores(event_offset=0):
                 "y": 0,
                 "catboost_snapshot": score,
                 "model_sha256": "test-model-sha256",
+                "gate_feature": score,
             })
     return pd.DataFrame(rows)
 
@@ -507,6 +555,23 @@ def test_snapshot_model_scores_required_confirmation_columns():
     assert scores["catboost_snapshot"].between(0.0, 1.0).all()
     assert scores["event_id"].nunique() == 8
 
+
+
+def test_snapshot_model_can_keep_numeric_gate_features():
+    training = snapshot_training_frame()
+    model = fit_snapshot_model(training, {"iterations": 10})
+    scores = score_snapshot_model(
+        model, snapshot_training_frame(100), passthrough_columns=["risk", "miss_distance"]
+    )
+    assert "risk" in scores.columns
+    assert "miss_distance" in scores.columns
+
+
+def test_snapshot_model_rejects_unknown_gate_features():
+    training = snapshot_training_frame()
+    model = fit_snapshot_model(training, {"iterations": 10})
+    with np.testing.assert_raises(ValueError):
+        score_snapshot_model(model, training, passthrough_columns=["not_a_feature"])
 
 def test_snapshot_event_weights_sum_to_one_per_event():
     prepared = prepare_snapshot_frame(snapshot_training_frame())

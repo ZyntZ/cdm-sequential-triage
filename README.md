@@ -39,12 +39,14 @@ Offline diagnostics now use `eligible_history_count`, which starts when the 2–
 - Event-level policy and calibration utilities: `src/policy.py`
 - Conformal applicability gate: `src/shift_gate.py`
 - Stateful three-decision policy and audit log: `src/triage.py`
+- Shift-gate artifacts are fitted on training events, calibrated from the maximum nonconformity over each calibration event's 2–7 day path, and fingerprinted before use in confirmation.
 - Calibration diagnostics: `python scripts/calibration_diagnostics.py --output reports/calibration.csv`
 - Minimum-history/timing diagnostics: `python scripts/history_gate_diagnostics.py --output reports/history_gate.csv`
 - Build frozen event partitions: `python scripts/make_partitions.py --archive data/raw/train_data.zip --output-dir data/processed/partitions --manifest data/processed/partitions.json --expected-sha256 68362fe5629cc80f17291f2d73f733bf4e922675e37b91a8ee79afadb46f3edc`
 - Train and score frozen snapshot model: `python scripts/train_snapshot.py --training data/processed/partitions/training.parquet --calibration data/processed/partitions/calibration.parquet --evaluation-features data/processed/partitions/evaluation_features.parquet --model artifacts/catboost_snapshot.cbm --calibration-scores artifacts/calibration_scores.parquet --evaluation-scores artifacts/evaluation_scores.parquet --manifest artifacts/snapshot_model.json`
-- Frozen calibration: `python scripts/confirm_policy.py calibrate --scores artifacts/calibration_scores.parquet --labels data/processed/partitions/calibration_labels.parquet --output calibration.json`
-- One-shot confirmation: `python scripts/confirm_policy.py confirm --scores artifacts/evaluation_scores.parquet --labels data/processed/partitions/evaluation_labels.parquet --calibration calibration.json --output confirmation.json --lock confirmation.lock`
+- Gate-aware training and scoring: add `--gate-features risk miss_distance mahalanobis_distance --gate-output artifacts/shift_gate.json --gate-alpha 0.05`; the selected numeric columns are retained in both score files.
+- Frozen calibration: `python scripts/confirm_policy.py calibrate --scores artifacts/calibration_scores.parquet --labels data/processed/partitions/calibration_labels.parquet --output calibration.json [--gate artifacts/shift_gate.json]`
+- One-shot confirmation: `python scripts/confirm_policy.py confirm --scores artifacts/evaluation_scores.parquet --labels data/processed/partitions/evaluation_labels.parquet --calibration calibration.json --output confirmation.json --lock confirmation.lock [--gate artifacts/shift_gate.json]`
 - Subgroup diagnostics: `python scripts/robustness_diagnostics.py --group mission_id --output reports/mission.csv`
 - Tests: `pytest -q`
 

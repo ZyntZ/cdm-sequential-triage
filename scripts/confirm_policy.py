@@ -20,14 +20,19 @@ from confirmation import (
     read_json,
     write_json,
 )
+from shift_gate import ConformalShiftGate
 
 
 def calibration_command(args: argparse.Namespace) -> None:
     prefixes = pd.read_parquet(args.scores)
     labels = pd.read_parquet(args.labels)
-    artifact = calibrate(prefixes, labels)
+    shift_gate = None if args.gate is None else ConformalShiftGate.load(args.gate)
+    artifact = calibrate(prefixes, labels, shift_gate=shift_gate)
     artifact["calibration_scores_sha256"] = file_sha256(args.scores)
     artifact["calibration_labels_sha256"] = file_sha256(args.labels)
+    artifact["shift_gate_file_sha256"] = (
+        None if args.gate is None else file_sha256(args.gate)
+    )
     artifact["created_at_utc"] = datetime.now(timezone.utc).isoformat()
     write_json(args.output, artifact)
     rule = artifact["calibration"]
@@ -51,6 +56,10 @@ def confirmation_command(args: argparse.Namespace) -> None:
         "evaluation_labels": str(args.labels),
         "evaluation_labels_sha256": file_sha256(args.labels),
         "output": str(args.output),
+        "shift_gate": None if args.gate is None else str(args.gate),
+        "shift_gate_file_sha256": (
+            None if args.gate is None else file_sha256(args.gate)
+        ),
     }
     acquire_confirmation_lock(args.lock, lock_payload)
     prefix_scores = pd.read_parquet(args.scores)
@@ -59,7 +68,8 @@ def confirmation_command(args: argparse.Namespace) -> None:
         prefix_scores,
         event_labels.loc[event_labels["event_id"].isin(prefix_scores["event_id"].unique())],
     )
-    result = evaluate(prefixes, artifact, event_labels)
+    shift_gate = None if args.gate is None else ConformalShiftGate.load(args.gate)
+    result = evaluate(prefixes, artifact, event_labels, shift_gate=shift_gate)
     result.update(lock_payload)
     result["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
     write_json(args.output, result)
@@ -80,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     calibration.add_argument("--scores", type=Path, required=True)
     calibration.add_argument("--labels", type=Path, required=True)
     calibration.add_argument("--output", type=Path, required=True)
+    calibration.add_argument("--gate", type=Path)
     calibration.set_defaults(handler=calibration_command)
 
     confirmation = commands.add_parser("confirm")
@@ -88,6 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     confirmation.add_argument("--labels", type=Path, required=True)
     confirmation.add_argument("--output", type=Path, required=True)
     confirmation.add_argument("--lock", type=Path, required=True)
+    confirmation.add_argument("--gate", type=Path)
     confirmation.set_defaults(handler=confirmation_command)
     return parser
 

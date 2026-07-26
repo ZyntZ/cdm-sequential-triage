@@ -7,8 +7,11 @@ receive SAFE-EXCLUDE.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -106,6 +109,109 @@ class ConformalShiftGate:
         )
         self.calibration_ = calibration
         return calibration
+
+    def calibrate_events(
+        self,
+        calibration_prefixes: pd.DataFrame,
+        alpha: float = 0.05,
+        event_col: str = "event_id",
+    ) -> GateCalibration:
+        """Calibrate against maximum nonconformity over each event history.
+
+        Each event contributes one score, so the conformal false-flag statement
+        applies to the probability that any prefix of a new event is blocked.
+        Complete event histories must stay together in this calibration frame.
+        """
+        if event_col not in calibration_prefixes.columns:
+            raise ValueError(f"Missing event column: {event_col}")
+        if calibration_prefixes.empty:
+            raise ValueError("calibration_prefixes must contain at least one row")
+        if calibration_prefixes[event_col].isna().any():
+            raise ValueError("Calibration event identifiers must not be missing")
+        prefix_scores = self.score(calibration_prefixes)
+        event_scores = prefix_scores.groupby(
+            calibration_prefixes[event_col], sort=False
+        ).max()
+        if not np.isfinite(event_scores.to_numpy(dtype=float)).all():
+            raise ValueError("Calibration gate features must be finite")
+        n = event_scores.size
+        if not 0 < alpha < 1:
+            raise ValueError("alpha must lie in (0, 1)")
+        rank = math.ceil((n + 1) * (1 - alpha))
+        threshold = np.inf if rank > n else float(np.sort(event_scores)[rank - 1])
+        calibration = GateCalibration(
+            threshold=threshold,
+            alpha=float(alpha),
+            rank=int(rank),
+            n_calibration=int(n),
+            marginal_flag_bound=float((n + 1 - rank) / (n + 1)),
+        )
+        self.calibration_ = calibration
+        return calibration
+
+    def to_payload(self) -> dict:
+        """Return a stable JSON-compatible representation of a calibrated gate."""
+        if self.location_ is None or self.scale_ is None:
+            raise RuntimeError("Fit the gate before serialisation")
+        if self.calibration_ is None:
+            raise RuntimeError("Calibrate the gate before serialisation")
+        calibration = asdict(self.calibration_)
+        if np.isposinf(self.calibration_.threshold):
+            calibration["threshold"] = None
+        return {
+            "schema_version": 1,
+            "feature_columns": list(self.feature_columns),
+            "min_scale": self.min_scale,
+            "location": [float(self.location_[column]) for column in self.feature_columns],
+            "scale": [float(self.scale_[column]) for column in self.feature_columns],
+            "calibration": calibration,
+        }
+
+    def fingerprint(self) -> str:
+        payload = json.dumps(
+            self.to_payload(), sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def save(self, path: str | Path) -> None:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(self.to_payload(), indent=2, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(target)
+
+    @classmethod
+    def load(cls, path: str | Path) -> "ConformalShiftGate":
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        if payload.get("schema_version") != 1:
+            raise ValueError("Unsupported shift-gate schema version")
+        columns = payload.get("feature_columns")
+        location = payload.get("location")
+        scale = payload.get("scale")
+        calibration = payload.get("calibration")
+        if not isinstance(columns, list) or len(location or []) != len(columns):
+            raise ValueError("Invalid shift-gate location payload")
+        if len(scale or []) != len(columns) or not isinstance(calibration, dict):
+            raise ValueError("Invalid shift-gate scale or calibration payload")
+        gate = cls(columns, min_scale=float(payload["min_scale"]))
+        gate.location_ = pd.Series(location, index=columns, dtype=float)
+        gate.scale_ = pd.Series(scale, index=columns, dtype=float)
+        if not np.isfinite(gate.location_.to_numpy()).all():
+            raise ValueError("Shift-gate location must be finite")
+        if not np.isfinite(gate.scale_.to_numpy()).all() or (gate.scale_ <= 0).any():
+            raise ValueError("Shift-gate scale must be finite and positive")
+        threshold = calibration.get("threshold")
+        gate.calibration_ = GateCalibration(
+            threshold=np.inf if threshold is None else float(threshold),
+            alpha=float(calibration["alpha"]),
+            rank=int(calibration["rank"]),
+            n_calibration=int(calibration["n_calibration"]),
+            marginal_flag_bound=float(calibration["marginal_flag_bound"]),
+        )
+        return gate
 
     def allows_safe_exclude(self, frame: pd.DataFrame) -> pd.Series:
         if self.calibration_ is None:
