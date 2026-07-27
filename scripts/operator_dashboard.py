@@ -108,6 +108,60 @@ def current_events(audit: pd.DataFrame) -> pd.DataFrame:
     return current.sort_values(["__priority", "time_to_tca", "score"], ascending=[True, True, False]).drop(columns="__priority")
 
 
+REASON_LABELS = {
+    "score_at_or_below_calibrated_threshold": "score reached the calibrated SAFE-EXCLUDE threshold",
+    "score_at_or_above_escalation_threshold": "score reached the escalation threshold",
+    "minimum_history_not_reached": "the policy accumulated enough eligible CDM history",
+    "decision_window_not_open": "the event entered the decision window",
+    "decision_window_closed": "the near edge of the decision window was crossed",
+    "safe_exclude_blocked_by_shift_gate": "the applicability gate blocked SAFE-EXCLUDE",
+    "score_between_decision_thresholds": "score remained between the decision thresholds",
+}
+
+
+def exemplar_transition(audit: pd.DataFrame) -> dict[str, Any] | None:
+    """Select a deterministic event whose message history changes decision."""
+    ordered = audit.sort_values(
+        ["__event_key", "sequence_number", "audit_batch"], kind="mergesort"
+    )
+    candidates = []
+    priority = {"SAFE-EXCLUDE": 0, "ESCALATE": 1, "MONITOR": 2}
+    for key, frame in ordered.groupby("__event_key", sort=False):
+        frame = frame.reset_index(drop=True)
+        transition_positions = np.flatnonzero(
+            frame["decision"].ne(frame["decision"].shift()).to_numpy()
+        )[1:]
+        for position in transition_positions:
+            previous = frame.iloc[position - 1]
+            current = frame.iloc[position]
+            candidates.append((
+                priority[str(current["decision"])],
+                -int(frame["sequence_number"].max()),
+                str(key), previous, current,
+            ))
+    if not candidates:
+        return None
+    _, _, _, previous, current = min(candidates, key=lambda item: item[:3])
+    reason = str(current["reason"])
+    return {
+        "event_id": (
+            current["event_id"].item()
+            if isinstance(current["event_id"], np.generic)
+            else current["event_id"]
+        ),
+        "transition_sequence": int(current["sequence_number"]),
+        "from_decision": str(previous["decision"]),
+        "to_decision": str(current["decision"]),
+        "reason": reason,
+        "explanation": REASON_LABELS.get(reason, reason.replace("_", " ")),
+        "previous_score": float(previous["score"]),
+        "score": float(current["score"]),
+        "time_to_tca": float(current["time_to_tca"]),
+        "eligible_history_count": int(current["eligible_history_count"]),
+        "shift_gate_allowed": bool(current["shift_gate_allowed"]),
+    }
+
+
 def _atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
@@ -165,6 +219,17 @@ def build_dashboard(audit_paths: list[Path], calibration_path: Path, output_path
         ]})
     timeline_json = json.dumps(timelines, ensure_ascii=False).replace("</", "<\\/")
 
+    exemplar = exemplar_transition(audit)
+    exemplar_html = ""
+    if exemplar is not None:
+        exemplar_html = f"""
+<section class='panel summary exemplar'><div class='panel-title'>EXEMPLAR DECISION TRANSITION</div>
+<div class='transition'><strong>{_escape(exemplar['event_id'])}</strong>
+<span class='badge {DECISION_CLASS[exemplar['from_decision']]}'>{_escape(exemplar['from_decision'])}</span>
+<span>→</span><span class='badge {DECISION_CLASS[exemplar['to_decision']]}'>{_escape(exemplar['to_decision'])}</span>
+<span>{_escape(exemplar['explanation'])}</span></div>
+<div class='source'>seq {exemplar['transition_sequence']} · score {_escape(exemplar['previous_score'])} → {_escape(exemplar['score'])} · TCA {_escape(exemplar['time_to_tca'])} d · eligible history {exemplar['eligible_history_count']} · gate {'ALLOW' if exemplar['shift_gate_allowed'] else 'BLOCK'}</div></section>"""
+
     confirmation_html = ""
     confirmation_summary = None
     if confirmation_path is not None:
@@ -202,11 +267,11 @@ def build_dashboard(audit_paths: list[Path], calibration_path: Path, output_path
 <section class='panel active'><div class='panel-title'>ACTIVE EVENT QUEUE</div><div class='table-wrap'><table><thead><tr><th>Event</th><th>Current decision</th><th>Score</th><th>TCA, d</th><th>Seq</th><th>History</th><th>Gate</th><th>Reason</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>
 <section class='panel policy'><div class='panel-title'>FROZEN POLICY</div><table>{policy_rows}</table><p class='caveat'>SAFE-EXCLUDE removes an event from the current manual-review queue while automated ingestion continues. It is not a maneuver command.</p></section>
 <section class='panel timeline'><div class='panel-title'>EVENT DECISION TIMELINE</div><select id='event-select'></select><div id='timeline' class='timeline-grid'></div></section>
-<section class='panel lineage'><div class='panel-title'>ARTIFACT LINEAGE</div><table><thead><tr><th>Artifact</th><th>SHA-256</th></tr></thead><tbody>{lineage}</tbody></table><div class='source'>model {_escape(calibration.get('model_sha256'))}<br>shift gate {_escape(calibration.get('shift_gate_sha256'))}</div></section>{confirmation_html}</div>
+<section class='panel lineage'><div class='panel-title'>ARTIFACT LINEAGE</div><table><thead><tr><th>Artifact</th><th>SHA-256</th></tr></thead><tbody>{lineage}</tbody></table><div class='source'>model {_escape(calibration.get('model_sha256'))}<br>shift gate {_escape(calibration.get('shift_gate_sha256'))}</div></section>{exemplar_html}{confirmation_html}</div>
 <footer>Dataset: ESA Collision Avoidance Challenge, Zenodo 10.5281/zenodo.4463683, CC BY 4.0. Target is high final calculated collision probability, not collision occurrence. Statistical control requires event-level exchangeability and is not an operational guarantee under arbitrary distribution shift.</footer>
 <script>const events={timeline_json};const select=document.getElementById('event-select'),timeline=document.getElementById('timeline');function esc(s){{return String(s).replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));}}for(const e of events){{const o=document.createElement('option');o.value=e.key;o.textContent=e.label;select.appendChild(o);}}function render(){{const e=events.find(x=>x.key===select.value)||events[0];timeline.innerHTML='';if(!e)return;for(const u of e.updates){{const d=document.createElement('div');d.className='step';d.innerHTML=`<strong>${{esc(u.decision)}}</strong><span>seq ${{u.sequence}} · TCA ${{u.tca.toFixed(3)}} d</span><span>score ${{u.score.toPrecision(5)}} · history ${{u.history}}</span><span>${{esc(u.reason)}} · gate ${{u.gate?'ALLOW':'BLOCK'}}</span>`;timeline.appendChild(d);}}}}select.addEventListener('change',render);render();</script></main></body></html>"""
     _atomic_write(output_path, document)
-    return {"updates": updates, "events": events, "current_decisions": {d: int(counts.get(d,0)) for d in DECISIONS}, "gate_active": bool(gate_active), "shown_events": len(shown), "confirmation": confirmation_summary}
+    return {"updates": updates, "events": events, "current_decisions": {d: int(counts.get(d,0)) for d in DECISIONS}, "gate_active": bool(gate_active), "shown_events": len(shown), "exemplar_transition": exemplar, "confirmation": confirmation_summary}
 
 
 def main() -> None:

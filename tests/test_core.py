@@ -1679,6 +1679,53 @@ def test_operator_dashboard_rejects_runtime_configuration_drift(tmp_path):
         load_audits([first_path, second_path], artifact, calibration)
 
 
+def test_operator_dashboard_selects_and_explains_safe_transition(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(
+        json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n"
+    )
+    first = dashboard_audit_frame(
+        calibration, event_id="changing-event", decision="MONITOR", sequence=1
+    )
+    first["score"] = 0.30
+    second = dashboard_audit_frame(
+        calibration, event_id="changing-event", decision="SAFE-EXCLUDE", sequence=2
+    )
+    second["score"] = 0.15
+    second["reason"] = "score_at_or_below_calibrated_threshold"
+    audit_path = tmp_path / "audit.parquet"
+    pd.concat([first, second], ignore_index=True).to_parquet(audit_path, index=False)
+    output = tmp_path / "dashboard.html"
+
+    summary = build_dashboard([audit_path], calibration, output)
+    exemplar = summary["exemplar_transition"]
+    document = output.read_text(encoding="utf-8")
+
+    assert exemplar["event_id"] == "changing-event"
+    assert exemplar["transition_sequence"] == 2
+    assert exemplar["from_decision"] == "MONITOR"
+    assert exemplar["to_decision"] == "SAFE-EXCLUDE"
+    assert exemplar["previous_score"] == 0.30
+    assert exemplar["score"] == 0.15
+    assert "EXEMPLAR DECISION TRANSITION" in document
+    assert "score reached the calibrated SAFE-EXCLUDE threshold" in document
+
+
+def test_operator_dashboard_has_no_exemplar_without_decision_change(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(
+        json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n"
+    )
+    audit_path = tmp_path / "audit.parquet"
+    dashboard_audit_frame(calibration).to_parquet(audit_path, index=False)
+    output = tmp_path / "dashboard.html"
+
+    summary = build_dashboard([audit_path], calibration, output)
+
+    assert summary["exemplar_transition"] is None
+    assert "EXEMPLAR DECISION TRANSITION" not in output.read_text(encoding="utf-8")
+
+
 def test_operator_dashboard_shows_failed_confirmation_honestly(tmp_path):
     calibration = tmp_path / "calibration.json"
     calibration.write_text(json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n")
