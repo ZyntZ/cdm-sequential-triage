@@ -8,6 +8,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from enum import Enum
+import hashlib
+import json
+import os
+from pathlib import Path
+import tempfile
 from typing import Any, Mapping
 
 import numpy as np
@@ -172,3 +177,207 @@ class SequentialTriagePolicy:
         self._counts.pop(event_id, None)
         self._eligible_counts.pop(event_id, None)
         self._last_tca.pop(event_id, None)
+
+    @staticmethod
+    def _encode_event_id(value: Any) -> dict[str, Any]:
+        if isinstance(value, np.generic):
+            value = value.item()
+        if value is None:
+            return {"type": "none", "value": None}
+        if isinstance(value, bool):
+            return {"type": "bool", "value": value}
+        if isinstance(value, int):
+            return {"type": "int", "value": value}
+        if isinstance(value, float) and np.isfinite(value):
+            return {"type": "float", "value": value}
+        if isinstance(value, str):
+            return {"type": "str", "value": value}
+        raise TypeError("event_id must be a JSON-compatible scalar")
+
+    @staticmethod
+    def _decode_event_id(payload: Mapping[str, Any]) -> Any:
+        kind = payload.get("type")
+        value = payload.get("value")
+        converters = {
+            "none": lambda _: None,
+            "bool": bool,
+            "int": int,
+            "float": float,
+            "str": str,
+        }
+        if kind not in converters:
+            raise ValueError(f"Unsupported event_id type: {kind!r}")
+        decoded = converters[kind](value)
+        if kind == "float" and not np.isfinite(decoded):
+            raise ValueError("Checkpoint event_id must be finite")
+        return decoded
+
+    @staticmethod
+    def _encode_float(value: float | None) -> float | str | None:
+        if value is None:
+            return None
+        numeric = float(value)
+        if np.isposinf(numeric):
+            return "positive_infinity"
+        if np.isneginf(numeric):
+            return "negative_infinity"
+        if not np.isfinite(numeric):
+            raise ValueError("Checkpoint floats must not contain NaN")
+        return numeric
+
+    @staticmethod
+    def _decode_float(value: float | str | None) -> float | None:
+        if value is None:
+            return None
+        if value == "positive_infinity":
+            return float("inf")
+        if value == "negative_infinity":
+            return float("-inf")
+        numeric = float(value)
+        if not np.isfinite(numeric):
+            raise ValueError("Checkpoint floats must be finite or encoded infinity")
+        return numeric
+
+    def _configuration_payload(self) -> dict[str, Any]:
+        return {
+            "safe_threshold": self._encode_float(self.safe_threshold),
+            "minimum_history": self.minimum_history,
+            "escalation_threshold": self._encode_float(self.escalation_threshold),
+            "min_days_to_tca": self.min_days_to_tca,
+            "max_days_to_tca": self.max_days_to_tca,
+            "shift_gate_fingerprint": (
+                None if self.shift_gate is None else self.shift_gate.fingerprint()
+            ),
+        }
+
+    def checkpoint(self, path: str | Path) -> str:
+        """Atomically persist the complete runtime state and return its SHA-256."""
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        state = []
+        for event_id, count in self._counts.items():
+            state.append({
+                "event_id": self._encode_event_id(event_id),
+                "sequence_number": count,
+                "eligible_history_count": self._eligible_counts[event_id],
+                "last_time_to_tca": self._last_tca[event_id],
+            })
+        audit = []
+        for decision in self._audit:
+            record = decision.to_record()
+            record["event_id"] = self._encode_event_id(decision.event_id)
+            record["shift_score"] = self._encode_float(decision.shift_score)
+            audit.append(record)
+        payload = {
+            "schema_version": 1,
+            "configuration": self._configuration_payload(),
+            "state": state,
+            "audit": audit,
+        }
+        canonical = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+        digest = hashlib.sha256(canonical).hexdigest()
+        envelope = {
+            "checkpoint_sha256": digest,
+            "payload": payload,
+        }
+        raw = (json.dumps(
+            envelope, indent=2, sort_keys=True, allow_nan=False
+        ) + "\n").encode("utf-8")
+        temporary_name = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", dir=target.parent, prefix=f".{target.name}.",
+                suffix=".tmp", delete=False
+            ) as stream:
+                temporary_name = stream.name
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_name, target)
+            temporary_name = None
+        finally:
+            if temporary_name is not None:
+                Path(temporary_name).unlink(missing_ok=True)
+        return digest
+
+    @classmethod
+    def restore(
+        cls,
+        path: str | Path,
+        shift_gate: ConformalShiftGate | None = None,
+    ) -> "SequentialTriagePolicy":
+        """Restore an atomically written checkpoint after validating its integrity."""
+        envelope = json.loads(Path(path).read_text(encoding="utf-8"))
+        payload = envelope.get("payload")
+        if not isinstance(payload, dict):
+            raise ValueError("Checkpoint payload is missing")
+        canonical = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+        digest = hashlib.sha256(canonical).hexdigest()
+        if envelope.get("checkpoint_sha256") != digest:
+            raise ValueError("Checkpoint integrity validation failed")
+        if payload.get("schema_version") != 1:
+            raise ValueError("Unsupported checkpoint schema version")
+        configuration = payload.get("configuration")
+        if not isinstance(configuration, dict):
+            raise ValueError("Checkpoint configuration is missing")
+        supplied_gate_fingerprint = (
+            None if shift_gate is None else shift_gate.fingerprint()
+        )
+        if configuration.get("shift_gate_fingerprint") != supplied_gate_fingerprint:
+            raise ValueError("Checkpoint shift gate does not match the supplied gate")
+        policy = cls(
+            safe_threshold=cls._decode_float(configuration["safe_threshold"]),
+            minimum_history=configuration["minimum_history"],
+            escalation_threshold=cls._decode_float(configuration["escalation_threshold"]),
+            shift_gate=shift_gate,
+            min_days_to_tca=configuration["min_days_to_tca"],
+            max_days_to_tca=configuration["max_days_to_tca"],
+        )
+        if policy._configuration_payload() != configuration:
+            raise ValueError("Checkpoint policy configuration is inconsistent")
+
+        state_records = payload.get("state")
+        audit_records = payload.get("audit")
+        if not isinstance(state_records, list) or not isinstance(audit_records, list):
+            raise ValueError("Checkpoint state or audit is invalid")
+        for record in state_records:
+            event_id = cls._decode_event_id(record["event_id"])
+            if event_id in policy._counts:
+                raise ValueError("Checkpoint contains duplicate event state")
+            count = int(record["sequence_number"])
+            eligible_count = int(record["eligible_history_count"])
+            last_tca = float(record["last_time_to_tca"])
+            if count < 1 or not 0 <= eligible_count <= count:
+                raise ValueError("Checkpoint event counters are inconsistent")
+            if not np.isfinite(last_tca) or last_tca < 0:
+                raise ValueError("Checkpoint last_time_to_tca is invalid")
+            policy._counts[event_id] = count
+            policy._eligible_counts[event_id] = eligible_count
+            policy._last_tca[event_id] = last_tca
+
+        for record in audit_records:
+            sequence_number = int(record["sequence_number"])
+            time_to_tca = float(record["time_to_tca"])
+            score = float(record["score"])
+            eligible_count = int(record["eligible_history_count"])
+            if sequence_number < 1 or not 0 <= eligible_count <= sequence_number:
+                raise ValueError("Checkpoint audit counters are inconsistent")
+            if not np.isfinite(time_to_tca) or time_to_tca < 0 or not np.isfinite(score):
+                raise ValueError("Checkpoint audit contains invalid numeric values")
+            policy._audit.append(TriageDecision(
+                event_id=cls._decode_event_id(record["event_id"]),
+                sequence_number=sequence_number,
+                time_to_tca=time_to_tca,
+                score=score,
+                decision=Decision(record["decision"]),
+                reason=str(record["reason"]),
+                shift_score=cls._decode_float(record.get("shift_score")),
+                shift_gate_allowed=bool(record["shift_gate_allowed"]),
+                decision_window_eligible=bool(record["decision_window_eligible"]),
+                eligible_history_count=eligible_count,
+            ))
+        return policy
