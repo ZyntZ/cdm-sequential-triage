@@ -228,6 +228,13 @@ class SequentialTriagePolicy:
                 raise ValueError(f"{name} must be hexadecimal") from error
         if self.has_processed_batch(scores_sha256):
             raise ValueError("Score batch has already been processed")
+        if (
+            self._processed_batches
+            and calibration_sha256 != self._processed_batches[0].calibration_sha256
+        ):
+            raise ValueError(
+                "All processed batches in a runtime session must use the same calibration"
+            )
         rows, events = int(rows), int(events)
         first_audit_row, last_audit_row = int(first_audit_row), int(last_audit_row)
         min_tca, max_tca = float(min_time_to_tca), float(max_time_to_tca)
@@ -243,6 +250,8 @@ class SequentialTriagePolicy:
                 raise ValueError("Processed batch audit ranges must be contiguous")
         elif first_audit_row != 1:
             raise ValueError("The first processed batch must start at audit row one")
+        if last_audit_row > len(self._audit):
+            raise ValueError("Processed batch range exceeds the audit log")
         if _require_current_tail and last_audit_row != len(self._audit):
             raise ValueError("Processed batch must cover the current audit tail")
         self._processed_batches.append(ProcessedBatch(
@@ -257,7 +266,12 @@ class SequentialTriagePolicy:
         ))
 
     def reset_event(self, event_id: Any) -> None:
-        """Forget runtime state for one event without deleting its audit records."""
+        """Forget untouched event state without invalidating the immutable audit."""
+        if any(decision.event_id == event_id for decision in self._audit):
+            raise RuntimeError(
+                "Cannot reset an event after audit records have been written; "
+                "use a new event_id for a new conjunction episode"
+            )
         self._counts.pop(event_id, None)
         self._eligible_counts.pop(event_id, None)
         self._last_tca.pop(event_id, None)
@@ -479,6 +493,30 @@ class SequentialTriagePolicy:
                 decision_window_eligible=bool(record["decision_window_eligible"]),
                 eligible_history_count=eligible_count,
             ))
+        audit_tails: dict[Any, TriageDecision] = {}
+        for decision in policy._audit:
+            previous = audit_tails.get(decision.event_id)
+            if previous is None:
+                if decision.sequence_number != 1:
+                    raise ValueError("Checkpoint audit must start each event at sequence one")
+            else:
+                if decision.sequence_number != previous.sequence_number + 1:
+                    raise ValueError("Checkpoint audit sequence numbers are not contiguous")
+                if decision.time_to_tca >= previous.time_to_tca:
+                    raise ValueError("Checkpoint audit TCA is not strictly decreasing")
+                if decision.eligible_history_count < previous.eligible_history_count:
+                    raise ValueError("Checkpoint eligible history is not monotone")
+            audit_tails[decision.event_id] = decision
+        if set(audit_tails) != set(policy._counts):
+            raise ValueError("Checkpoint state and audit event rosters differ")
+        for event_id, tail in audit_tails.items():
+            if policy._counts[event_id] != tail.sequence_number:
+                raise ValueError("Checkpoint state sequence does not match audit tail")
+            if policy._eligible_counts[event_id] != tail.eligible_history_count:
+                raise ValueError("Checkpoint state history does not match audit tail")
+            if policy._last_tca[event_id] != tail.time_to_tca:
+                raise ValueError("Checkpoint state TCA does not match audit tail")
+
         batch_records = [] if schema_version == 1 else payload.get("processed_batches")
         if not isinstance(batch_records, list):
             raise ValueError("Checkpoint processed batch ledger is invalid")

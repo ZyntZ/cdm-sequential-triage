@@ -806,15 +806,22 @@ def test_runtime_rejects_invalid_decision_window():
         SequentialTriagePolicy(0.20, min_days_to_tca=7.0, max_days_to_tca=2.0)
 
 
-def test_reset_event_resets_eligible_history_count():
+def test_reset_event_rejects_reuse_after_audit():
     policy = SequentialTriagePolicy(safe_threshold=0.20, minimum_history=2)
     policy.update("event", 6.0, 0.10)
-    policy.reset_event("event")
-    restarted = policy.update("event", 6.0, 0.10)
 
-    assert restarted.sequence_number == 1
-    assert restarted.eligible_history_count == 1
-    assert restarted.decision == Decision.MONITOR
+    with np.testing.assert_raises(RuntimeError):
+        policy.reset_event("event")
+
+    continued = policy.update("event", 5.0, 0.10)
+    assert continued.sequence_number == 2
+    assert continued.eligible_history_count == 2
+
+
+def test_reset_event_allows_untouched_unknown_event():
+    policy = SequentialTriagePolicy(safe_threshold=0.20, minimum_history=2)
+    policy.reset_event("unknown")
+    assert policy.continuation_limits() == {}
 
 def confirmation_scores(event_offset=0):
     rows = []
@@ -2067,3 +2074,91 @@ def test_checkpoint_integrity_covers_processed_batch_ledger(tmp_path):
 
     with np.testing.assert_raises(ValueError):
         SequentialTriagePolicy.restore(checkpoint)
+
+
+
+def _rewrite_checkpoint_with_valid_digest(path, mutate):
+    import hashlib
+    envelope = json.loads(path.read_text(encoding="utf-8"))
+    mutate(envelope["payload"])
+    canonical = json.dumps(
+        envelope["payload"], sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    envelope["checkpoint_sha256"] = hashlib.sha256(canonical).hexdigest()
+    path.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
+
+
+def test_restore_rejects_state_audit_tail_mismatch(tmp_path):
+    policy = SequentialTriagePolicy(safe_threshold=0.20)
+    policy.update("event", 7.0, 0.10)
+    policy.update("event", 6.0, 0.10)
+    checkpoint = tmp_path / "runtime.json"
+    policy.checkpoint(checkpoint)
+    _rewrite_checkpoint_with_valid_digest(
+        checkpoint,
+        lambda payload: payload["state"][0].update({"last_time_to_tca": 5.0}),
+    )
+
+    with np.testing.assert_raises(ValueError):
+        SequentialTriagePolicy.restore(checkpoint)
+
+
+def test_restore_rejects_noncontiguous_audit_sequence(tmp_path):
+    policy = SequentialTriagePolicy(safe_threshold=0.20)
+    policy.update("event", 7.0, 0.10)
+    policy.update("event", 6.0, 0.10)
+    checkpoint = tmp_path / "runtime.json"
+    policy.checkpoint(checkpoint)
+    _rewrite_checkpoint_with_valid_digest(
+        checkpoint,
+        lambda payload: payload["audit"][1].update({"sequence_number": 3}),
+    )
+
+    with np.testing.assert_raises(ValueError):
+        SequentialTriagePolicy.restore(checkpoint)
+
+
+def test_restore_rejects_nonmonotone_audit_tca(tmp_path):
+    policy = SequentialTriagePolicy(safe_threshold=0.20)
+    policy.update("event", 7.0, 0.10)
+    policy.update("event", 6.0, 0.10)
+    checkpoint = tmp_path / "runtime.json"
+    policy.checkpoint(checkpoint)
+    _rewrite_checkpoint_with_valid_digest(
+        checkpoint,
+        lambda payload: payload["audit"][1].update({"time_to_tca": 8.0}),
+    )
+
+    with np.testing.assert_raises(ValueError):
+        SequentialTriagePolicy.restore(checkpoint)
+
+
+def test_processed_batch_ledger_rejects_calibration_change():
+    policy = SequentialTriagePolicy(safe_threshold=0.20)
+    policy.update("event", 7.0, 0.10)
+    policy.record_processed_batch(
+        scores_sha256="a" * 64, calibration_sha256="c" * 64,
+        rows=1, events=1, min_time_to_tca=7.0, max_time_to_tca=7.0,
+        first_audit_row=1, last_audit_row=1,
+    )
+    policy.update("event", 6.0, 0.10)
+
+    with np.testing.assert_raises(ValueError):
+        policy.record_processed_batch(
+            scores_sha256="b" * 64, calibration_sha256="d" * 64,
+            rows=1, events=1, min_time_to_tca=6.0, max_time_to_tca=6.0,
+            first_audit_row=2, last_audit_row=2,
+        )
+
+
+def test_processed_batch_range_cannot_exceed_audit():
+    policy = SequentialTriagePolicy(safe_threshold=0.20)
+    policy.update("event", 7.0, 0.10)
+
+    with np.testing.assert_raises(ValueError):
+        policy.record_processed_batch(
+            scores_sha256="a" * 64, calibration_sha256="b" * 64,
+            rows=2, events=1, min_time_to_tca=6.0, max_time_to_tca=7.0,
+            first_audit_row=1, last_audit_row=2,
+            _require_current_tail=False,
+        )
