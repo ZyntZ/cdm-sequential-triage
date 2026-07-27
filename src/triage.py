@@ -238,7 +238,8 @@ class SequentialTriagePolicy:
             raise ValueError("Checkpoint floats must be finite or encoded infinity")
         return numeric
 
-    def _configuration_payload(self) -> dict[str, Any]:
+    def configuration(self) -> dict[str, Any]:
+        """Return the complete JSON-safe runtime configuration."""
         return {
             "safe_threshold": self._encode_float(self.safe_threshold),
             "minimum_history": self.minimum_history,
@@ -249,6 +250,16 @@ class SequentialTriagePolicy:
                 None if self.shift_gate is None else self.shift_gate.fingerprint()
             ),
         }
+
+    def configuration_fingerprint(self) -> str:
+        """Return a stable SHA-256 fingerprint of the runtime configuration."""
+        canonical = json.dumps(
+            self.configuration(), sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    def _configuration_payload(self) -> dict[str, Any]:
+        return self.configuration()
 
     def checkpoint(self, path: str | Path) -> str:
         """Atomically persist the complete runtime state and return its SHA-256."""

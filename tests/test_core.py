@@ -1315,8 +1315,51 @@ def test_replay_scores_writes_complete_operator_audit(tmp_path):
     assert audit["scores_sha256"].nunique() == 1
     assert audit["calibration_sha256"].nunique() == 1
     assert audit["runtime_checkpoint_sha256"].str.len().eq(64).all()
+    assert audit["runtime_configuration_sha256"].str.len().eq(64).all()
+    assert audit["safe_threshold"].eq(0.20).all()
+    assert audit["escalation_threshold"].isna().all()
+    assert audit["minimum_history"].eq(3).all()
+    assert audit["min_days_to_tca"].eq(2.0).all()
+    assert audit["max_days_to_tca"].eq(7.0).all()
     restored = SequentialTriagePolicy.restore(checkpoint)
     assert len(restored.audit_log()) == 6
+
+
+def test_replay_audit_records_escalation_policy_and_rejects_drift(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(runtime_calibration_artifact()) + "\n")
+    checkpoint = tmp_path / "runtime.json"
+    scores = tmp_path / "scores.parquet"
+    pd.DataFrame({
+        "event_id": ["high"],
+        "time_to_tca": [7.0],
+        "catboost_tail_aligned": [0.90],
+        "model_sha256": ["runtime-model"],
+    }).to_parquet(scores, index=False)
+
+    audit = run_replay(
+        scores, calibration, tmp_path / "audit.parquet",
+        checkpoint_path=checkpoint, escalation_threshold=0.80,
+    )
+
+    assert audit.iloc[0]["decision"] == "ESCALATE"
+    assert audit["escalation_threshold"].eq(0.80).all()
+    assert audit["runtime_configuration_sha256"].nunique() == 1
+    restored = SequentialTriagePolicy.restore(checkpoint)
+    assert restored.configuration_fingerprint() == audit.iloc[0]["runtime_configuration_sha256"]
+
+    next_scores = tmp_path / "next.parquet"
+    pd.DataFrame({
+        "event_id": ["other"],
+        "time_to_tca": [7.0],
+        "catboost_tail_aligned": [0.90],
+        "model_sha256": ["runtime-model"],
+    }).to_parquet(next_scores, index=False)
+    with np.testing.assert_raises(ValueError):
+        run_replay(
+            next_scores, calibration, tmp_path / "next-audit.parquet",
+            checkpoint_path=checkpoint, escalation_threshold=0.85,
+        )
 
 
 def test_replay_scores_resumes_from_checkpoint(tmp_path):

@@ -193,6 +193,12 @@ def run_replay(
     audit["model_sha256"] = str(artifact["model_sha256"])
     audit["shift_gate_sha256"] = artifact.get("shift_gate_sha256")
     audit["model_manifest_sha256"] = artifact.get("model_manifest_sha256")
+    audit["runtime_configuration_sha256"] = runtime.configuration_fingerprint()
+    audit["safe_threshold"] = runtime.safe_threshold
+    audit["escalation_threshold"] = runtime.escalation_threshold
+    audit["minimum_history"] = runtime.minimum_history
+    audit["min_days_to_tca"] = runtime.min_days_to_tca
+    audit["max_days_to_tca"] = runtime.max_days_to_tca
     audit["is_current_decision"] = ~audit["event_id"].duplicated(keep="last")
 
     checkpoint_digest = None
