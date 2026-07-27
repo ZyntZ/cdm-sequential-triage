@@ -23,7 +23,10 @@ from repeated_calibration_stability import (
 from freeze_next_validation import freeze_plan
 from train_final_tail_aligned import read_locked_candidate
 from score_final_tail_aligned import score_file as score_tail_file
-from replay_scores import load_runtime, replay_scores, run_replay, validate_score_stream
+from replay_scores import (
+    load_runtime, replay_scores, run_replay, validate_runtime_continuation,
+    validate_score_stream,
+)
 from operator_dashboard import build_dashboard, current_events, load_audits
 from evidence_dashboard import build_evidence_dashboard
 from run_demo import run_demo
@@ -1388,6 +1391,80 @@ def test_replay_scores_resumes_from_checkpoint(tmp_path):
     assert audit.iloc[-1]["decision"] == "SAFE-EXCLUDE"
     restored = SequentialTriagePolicy.restore(checkpoint)
     assert restored.audit_log()["sequence_number"].tolist() == [1, 2, 3]
+
+
+def test_replay_rejects_repeated_delivery_before_mutating_runtime():
+    runtime = SequentialTriagePolicy(safe_threshold=0.20, minimum_history=3)
+    first = pd.DataFrame({
+        "event_id": ["event", "event"],
+        "time_to_tca": [7.0, 6.0],
+        "catboost_tail_aligned": [0.10, 0.10],
+    })
+    replay_scores(first, runtime, "catboost_tail_aligned")
+    before = runtime.audit_log()
+    repeated = pd.DataFrame({
+        "event_id": ["new", "event"],
+        "time_to_tca": [7.0, 6.0],
+        "catboost_tail_aligned": [0.10, 0.10],
+    })
+
+    with np.testing.assert_raises(ValueError):
+        replay_scores(repeated, runtime, "catboost_tail_aligned")
+
+    pd.testing.assert_frame_equal(runtime.audit_log(), before)
+    assert "new" not in runtime.continuation_limits()
+
+
+def test_replay_rejects_out_of_order_batch_before_mutating_runtime():
+    runtime = SequentialTriagePolicy(safe_threshold=0.20, minimum_history=3)
+    invalid = pd.DataFrame({
+        "event_id": ["event", "event", "other"],
+        "time_to_tca": [7.0, 6.0, 7.0],
+        "catboost_tail_aligned": [0.10, 0.10, 0.10],
+    }).iloc[[1, 0, 2]].reset_index(drop=True)
+
+    with np.testing.assert_raises(ValueError):
+        validate_runtime_continuation(invalid, runtime)
+
+    assert runtime.audit_log().empty
+    assert runtime.continuation_limits() == {}
+
+
+def test_run_replay_rejects_stale_resume_without_advancing_checkpoint(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(runtime_calibration_artifact()) + "\n")
+    checkpoint = tmp_path / "runtime.json"
+    first_scores = tmp_path / "first.parquet"
+    pd.DataFrame({
+        "event_id": ["event", "event"],
+        "time_to_tca": [7.0, 6.0],
+        "catboost_tail_aligned": [0.10, 0.10],
+        "model_sha256": ["runtime-model", "runtime-model"],
+    }).to_parquet(first_scores, index=False)
+    run_replay(
+        first_scores, calibration, tmp_path / "first-audit.parquet",
+        checkpoint_path=checkpoint,
+    )
+    checkpoint_before = checkpoint.read_bytes()
+
+    stale_scores = tmp_path / "stale.parquet"
+    pd.DataFrame({
+        "event_id": ["new", "event"],
+        "time_to_tca": [7.0, 6.0],
+        "catboost_tail_aligned": [0.10, 0.10],
+        "model_sha256": ["runtime-model", "runtime-model"],
+    }).to_parquet(stale_scores, index=False)
+    output = tmp_path / "stale-audit.parquet"
+
+    with np.testing.assert_raises(ValueError):
+        run_replay(
+            stale_scores, calibration, output, checkpoint_path=checkpoint,
+        )
+
+    assert checkpoint.read_bytes() == checkpoint_before
+    assert not output.exists()
+    restored = SequentialTriagePolicy.restore(checkpoint)
+    assert restored.audit_log()["sequence_number"].tolist() == [1, 2]
 
 
 def test_replay_scores_rejects_model_overlap_and_duplicate_updates(tmp_path):

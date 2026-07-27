@@ -172,6 +172,10 @@ class SequentialTriagePolicy:
             return pd.DataFrame(columns=columns)
         return pd.DataFrame([decision.to_record() for decision in self._audit])
 
+    def continuation_limits(self) -> dict[Any, float]:
+        """Return the last accepted TCA for every active event."""
+        return dict(self._last_tca)
+
     def reset_event(self, event_id: Any) -> None:
         """Forget runtime state for one event without deleting its audit records."""
         self._counts.pop(event_id, None)
