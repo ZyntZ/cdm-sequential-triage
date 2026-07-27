@@ -24,6 +24,7 @@ from freeze_next_validation import freeze_plan
 from train_final_tail_aligned import read_locked_candidate
 from score_final_tail_aligned import score_file as score_tail_file
 from replay_scores import load_runtime, replay_scores, run_replay, validate_score_stream
+from operator_dashboard import build_dashboard, current_events, load_audits
 from confirm_policy import calibration_command
 from validation_plan import (
     evaluation_planning_table, maximum_passing_failures,
@@ -1509,3 +1510,127 @@ def test_replay_marks_current_decision_within_each_output_batch(tmp_path):
     }).to_parquet(scores, index=False)
     audit = run_replay(scores, calibration, tmp_path / "audit.parquet")
     assert audit["is_current_decision"].tolist() == [False, True, True]
+
+
+def dashboard_audit_frame(calibration_path, event_id="event", decision="MONITOR", sequence=1):
+    from confirmation import file_sha256
+    return pd.DataFrame({
+        "event_id": [event_id],
+        "sequence_number": [sequence],
+        "time_to_tca": [5.0],
+        "score": [0.4],
+        "decision": [decision],
+        "reason": ["score_between_decision_thresholds"],
+        "shift_score": [np.nan],
+        "shift_gate_allowed": [True],
+        "decision_window_eligible": [True],
+        "eligible_history_count": [3],
+        "scores_sha256": ["a" * 64],
+        "calibration_sha256": [file_sha256(calibration_path)],
+        "model_sha256": ["c" * 64],
+        "shift_gate_sha256": [None],
+        "model_manifest_sha256": [None],
+        "runtime_checkpoint_sha256": [None],
+        "is_current_decision": [True],
+    })
+
+
+def test_operator_dashboard_builds_self_contained_html(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n")
+    audit_path = tmp_path / "audit.parquet"
+    dashboard_audit_frame(calibration, decision="SAFE-EXCLUDE").to_parquet(audit_path, index=False)
+    output = tmp_path / "dashboard.html"
+
+    summary = build_dashboard([audit_path], calibration, output)
+    document = output.read_text(encoding="utf-8")
+
+    assert summary["events"] == 1
+    assert summary["current_decisions"]["SAFE-EXCLUDE"] == 1
+    assert "Operator Console" in document
+    assert "SAFE-EXCLUDE" in document
+    assert "c" * 64 in document
+    assert "https://" not in document
+
+
+def test_operator_dashboard_combines_resumed_batches_by_latest_sequence(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n")
+    first = dashboard_audit_frame(calibration, decision="MONITOR", sequence=1)
+    second = dashboard_audit_frame(calibration, decision="SAFE-EXCLUDE", sequence=2)
+    first_path, second_path = tmp_path / "first.parquet", tmp_path / "second.parquet"
+    first.to_parquet(first_path, index=False)
+    second.to_parquet(second_path, index=False)
+
+    combined = load_audits([first_path, second_path], runtime_calibration_artifact(model_hash="c" * 64), calibration)
+    current = current_events(combined)
+
+    assert len(current) == 1
+    assert current.iloc[0]["decision"] == "SAFE-EXCLUDE"
+    assert current.iloc[0]["sequence_number"] == 2
+
+
+def test_operator_dashboard_escapes_event_ids(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n")
+    audit_path = tmp_path / "audit.parquet"
+    dashboard_audit_frame(calibration, event_id="<script>alert(1)</script>").to_parquet(audit_path, index=False)
+    output = tmp_path / "dashboard.html"
+
+    build_dashboard([audit_path], calibration, output)
+    document = output.read_text(encoding="utf-8")
+
+    assert "<script>alert(1)</script>" not in document
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in document
+
+
+def test_operator_dashboard_rejects_wrong_lineage_and_overlapping_batches(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n")
+    valid = dashboard_audit_frame(calibration)
+    wrong = valid.copy()
+    wrong["calibration_sha256"] = "b" * 64
+    wrong_path = tmp_path / "wrong.parquet"
+    wrong.to_parquet(wrong_path, index=False)
+    with np.testing.assert_raises(ValueError):
+        load_audits([wrong_path], runtime_calibration_artifact(model_hash="c" * 64), calibration)
+
+    first_path, duplicate_path = tmp_path / "first.parquet", tmp_path / "duplicate.parquet"
+    valid.to_parquet(first_path, index=False)
+    valid.to_parquet(duplicate_path, index=False)
+    with np.testing.assert_raises(ValueError):
+        load_audits([first_path, duplicate_path], runtime_calibration_artifact(model_hash="c" * 64), calibration)
+
+
+def test_operator_dashboard_shows_failed_confirmation_honestly(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n")
+    audit_path = tmp_path / "audit.parquet"
+    dashboard_audit_frame(calibration).to_parquet(audit_path, index=False)
+    confirmation = tmp_path / "confirmation.json"
+    confirmation.write_text(json.dumps({"evaluation": {
+        "danger_k": 4, "danger_n": 73, "danger_rate": 4 / 73,
+        "danger_ucb": 0.121, "safe_negative_rate": 0.7064,
+        "median_first_safe_tca": 5.53,
+    }}) + "\n")
+    output = tmp_path / "dashboard.html"
+
+    summary = build_dashboard([audit_path], calibration, output, confirmation)
+    document = output.read_text(encoding="utf-8")
+
+    assert summary["confirmation"]["passed"] is False
+    assert "NOT MET" in document
+    assert "12.10%" in document
+    assert "does not validate" in document
+
+
+def test_operator_dashboard_refuses_overwrite(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n")
+    audit_path = tmp_path / "audit.parquet"
+    dashboard_audit_frame(calibration).to_parquet(audit_path, index=False)
+    output = tmp_path / "dashboard.html"
+    output.write_text("sentinel", encoding="utf-8")
+    with np.testing.assert_raises(FileExistsError):
+        build_dashboard([audit_path], calibration, output)
+    assert output.read_text(encoding="utf-8") == "sentinel"
