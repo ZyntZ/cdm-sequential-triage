@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -88,17 +89,34 @@ def freeze_study(
     manifest_hash = hashlib.sha256(payload).hexdigest()
     output.parent.mkdir(parents=True, exist_ok=True)
     lock.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name(output.name + ".tmp")
-    temporary.write_bytes(payload)
+    temporary_name = None
+    lock_created = False
     try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=output.parent, prefix=f".{output.name}.",
+            suffix=".tmp", delete=False,
+        ) as stream:
+            temporary_name = stream.name
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
         descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+        lock_created = True
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump({"study_manifest_sha256": manifest_hash}, handle, indent=2, sort_keys=True)
             handle.write("\n")
-        os.replace(temporary, output)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, output)
+        temporary_name = None
+        lock_created = False
     except Exception:
-        temporary.unlink(missing_ok=True)
+        if lock_created:
+            lock.unlink(missing_ok=True)
         raise
+    finally:
+        if temporary_name is not None:
+            Path(temporary_name).unlink(missing_ok=True)
     return manifest
 
 

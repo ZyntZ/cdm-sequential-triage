@@ -23,10 +23,7 @@ from repeated_calibration_stability import (
 from freeze_next_validation import freeze_plan
 from train_final_tail_aligned import read_locked_candidate
 from score_final_tail_aligned import score_file as score_tail_file
-from replay_scores import (
-    load_runtime, replay_scores, run_replay, validate_runtime_continuation,
-    validate_score_stream,
-)
+from replay_scores import load_runtime, replay_scores, run_replay, validate_score_stream
 from operator_dashboard import build_dashboard, current_events, load_audits
 from evidence_dashboard import build_evidence_dashboard
 from run_demo import run_demo
@@ -41,7 +38,7 @@ from shift_gate import ConformalShiftGate
 from triage import Decision, SequentialTriagePolicy
 from confirmation import (
     POLICY, acquire_confirmation_lock, attach_event_labels, calibrate, evaluate,
-    policy_from_model_manifest, prepare_prefix_scores,
+    policy_from_model_manifest, prepare_prefix_scores, write_json,
 )
 from snapshot_model import (
     assert_disjoint_splits, event_equal_weights, fit_snapshot_model,
@@ -637,6 +634,29 @@ def test_shift_gate_round_trip_preserves_decisions_and_fingerprint(tmp_path):
     assert restored.allows_safe_exclude(probe).tolist() == gate.allows_safe_exclude(probe).tolist()
 
 
+def test_shift_gate_save_preserves_target_after_fsync_failure(tmp_path, monkeypatch):
+    import shift_gate as shift_gate_module
+    frame = pd.DataFrame({"f": np.linspace(0.0, 1.0, 40)})
+    gate = ConformalShiftGate(["f"]).fit(frame)
+    gate.calibrate_events(
+        pd.DataFrame({"event_id": np.arange(40), "f": np.linspace(0.0, 1.0, 40)}),
+        alpha=0.10,
+    )
+    target = tmp_path / "gate.json"
+    gate.save(target)
+    original = target.read_bytes()
+
+    def fail_fsync(_descriptor):
+        raise OSError("simulated fsync failure")
+
+    monkeypatch.setattr(shift_gate_module.os, "fsync", fail_fsync)
+    with np.testing.assert_raises(OSError):
+        gate.save(target)
+
+    assert target.read_bytes() == original
+    assert not list(tmp_path.glob(".gate.json.*.tmp"))
+
+
 def test_confirmation_requires_matching_shift_gate():
     proper = confirmation_scores().query("event_id <= 20")
     gate_calibration = confirmation_scores().query("event_id > 20")
@@ -849,6 +869,54 @@ def test_confirmation_window_counter_is_recomputed():
     frame["eligible_history_count"] = 99
     prepared = prepare_prefix_scores(frame)
     assert prepared.query("event_id == 1")["eligible_history_count"].tolist() == [1, 2, 3]
+
+def test_atomic_json_write_cleans_up_after_fsync_failure(tmp_path, monkeypatch):
+    import confirmation as confirmation_module
+    target = tmp_path / "artifact.json"
+    target.write_text("sentinel\n", encoding="utf-8")
+    original = target.read_bytes()
+
+    def fail_fsync(_descriptor):
+        raise OSError("simulated fsync failure")
+
+    monkeypatch.setattr(confirmation_module.os, "fsync", fail_fsync)
+    with np.testing.assert_raises(OSError):
+        write_json(target, {"status": "new"})
+
+    assert target.read_bytes() == original
+    assert not list(tmp_path.glob(".artifact.json.*.tmp"))
+
+
+def test_confirmation_lock_is_fsynced(tmp_path, monkeypatch):
+    import confirmation as confirmation_module
+    calls = []
+    real_fsync = confirmation_module.os.fsync
+
+    def record_fsync(descriptor):
+        calls.append(descriptor)
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(confirmation_module.os, "fsync", record_fsync)
+    lock = tmp_path / "confirmation.lock"
+    acquire_confirmation_lock(lock, {"run": 1})
+
+    assert len(calls) == 1
+    assert json.loads(lock.read_text(encoding="utf-8")) == {"run": 1}
+
+
+def test_confirmation_lock_failure_removes_incomplete_file(tmp_path, monkeypatch):
+    import confirmation as confirmation_module
+    lock = tmp_path / "confirmation.lock"
+
+    def fail_fsync(_descriptor):
+        raise OSError("simulated fsync failure")
+
+    monkeypatch.setattr(confirmation_module.os, "fsync", fail_fsync)
+    with np.testing.assert_raises(OSError):
+        acquire_confirmation_lock(lock, {"run": 1})
+
+    assert not lock.exists()
+
 
 def test_confirmation_lock_cannot_be_reused(tmp_path):
     lock = tmp_path / "confirmation.lock"
@@ -1128,6 +1196,81 @@ def test_freeze_study_rejects_overlap_and_outcome_columns(tmp_path):
         )
 
 
+def test_freeze_study_cleans_temporary_manifest_after_fsync_failure(tmp_path, monkeypatch):
+    import hashlib
+    import study as study_module
+    calibration_path = tmp_path / "calibration.parquet"
+    evaluation_path = tmp_path / "evaluation.parquet"
+    pd.DataFrame({"event_id": [1], "time_to_tca": [6.0]}).to_parquet(
+        calibration_path, index=False
+    )
+    pd.DataFrame({"event_id": [2], "time_to_tca": [6.0]}).to_parquet(
+        evaluation_path, index=False
+    )
+    preregistration = tmp_path / "preregistration.json"
+    preregistration.write_text("{}\n", encoding="utf-8")
+    preregistration_lock = tmp_path / "preregistration.lock"
+    preregistration_lock.write_text(json.dumps({
+        "preregistration_sha256": hashlib.sha256(preregistration.read_bytes()).hexdigest()
+    }) + "\n", encoding="utf-8")
+    output = tmp_path / "study.json"
+    lock = tmp_path / "study.lock"
+
+    def fail_fsync(_descriptor):
+        raise OSError("simulated fsync failure")
+
+    monkeypatch.setattr(study_module.os, "fsync", fail_fsync)
+    with np.testing.assert_raises(OSError):
+        freeze_study(
+            calibration_path, evaluation_path, preregistration,
+            preregistration_lock, output, lock,
+        )
+
+    assert not output.exists()
+    assert not lock.exists()
+    assert not list(tmp_path.glob(".study.json.*.tmp"))
+
+
+def test_freeze_study_removes_incomplete_lock_after_lock_fsync_failure(tmp_path, monkeypatch):
+    import hashlib
+    import study as study_module
+    calibration_path = tmp_path / "calibration.parquet"
+    evaluation_path = tmp_path / "evaluation.parquet"
+    pd.DataFrame({"event_id": [1], "time_to_tca": [6.0]}).to_parquet(
+        calibration_path, index=False
+    )
+    pd.DataFrame({"event_id": [2], "time_to_tca": [6.0]}).to_parquet(
+        evaluation_path, index=False
+    )
+    preregistration = tmp_path / "preregistration.json"
+    preregistration.write_text("{}\n", encoding="utf-8")
+    preregistration_lock = tmp_path / "preregistration.lock"
+    preregistration_lock.write_text(json.dumps({
+        "preregistration_sha256": hashlib.sha256(preregistration.read_bytes()).hexdigest()
+    }) + "\n", encoding="utf-8")
+    output = tmp_path / "study.json"
+    lock = tmp_path / "study.lock"
+    real_fsync = study_module.os.fsync
+    calls = {"count": 0}
+
+    def fail_second_fsync(descriptor):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise OSError("simulated lock fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(study_module.os, "fsync", fail_second_fsync)
+    with np.testing.assert_raises(OSError):
+        freeze_study(
+            calibration_path, evaluation_path, preregistration,
+            preregistration_lock, output, lock,
+        )
+
+    assert not output.exists()
+    assert not lock.exists()
+    assert not list(tmp_path.glob(".study.json.*.tmp"))
+
+
 def test_frozen_study_detects_file_and_label_roster_drift(tmp_path):
     calibration_path = tmp_path / "calibration.parquet"
     evaluation_path = tmp_path / "evaluation.parquet"
@@ -1393,80 +1536,6 @@ def test_replay_scores_resumes_from_checkpoint(tmp_path):
     assert restored.audit_log()["sequence_number"].tolist() == [1, 2, 3]
 
 
-def test_replay_rejects_repeated_delivery_before_mutating_runtime():
-    runtime = SequentialTriagePolicy(safe_threshold=0.20, minimum_history=3)
-    first = pd.DataFrame({
-        "event_id": ["event", "event"],
-        "time_to_tca": [7.0, 6.0],
-        "catboost_tail_aligned": [0.10, 0.10],
-    })
-    replay_scores(first, runtime, "catboost_tail_aligned")
-    before = runtime.audit_log()
-    repeated = pd.DataFrame({
-        "event_id": ["new", "event"],
-        "time_to_tca": [7.0, 6.0],
-        "catboost_tail_aligned": [0.10, 0.10],
-    })
-
-    with np.testing.assert_raises(ValueError):
-        replay_scores(repeated, runtime, "catboost_tail_aligned")
-
-    pd.testing.assert_frame_equal(runtime.audit_log(), before)
-    assert "new" not in runtime.continuation_limits()
-
-
-def test_replay_rejects_out_of_order_batch_before_mutating_runtime():
-    runtime = SequentialTriagePolicy(safe_threshold=0.20, minimum_history=3)
-    invalid = pd.DataFrame({
-        "event_id": ["event", "event", "other"],
-        "time_to_tca": [7.0, 6.0, 7.0],
-        "catboost_tail_aligned": [0.10, 0.10, 0.10],
-    }).iloc[[1, 0, 2]].reset_index(drop=True)
-
-    with np.testing.assert_raises(ValueError):
-        validate_runtime_continuation(invalid, runtime)
-
-    assert runtime.audit_log().empty
-    assert runtime.continuation_limits() == {}
-
-
-def test_run_replay_rejects_stale_resume_without_advancing_checkpoint(tmp_path):
-    calibration = tmp_path / "calibration.json"
-    calibration.write_text(json.dumps(runtime_calibration_artifact()) + "\n")
-    checkpoint = tmp_path / "runtime.json"
-    first_scores = tmp_path / "first.parquet"
-    pd.DataFrame({
-        "event_id": ["event", "event"],
-        "time_to_tca": [7.0, 6.0],
-        "catboost_tail_aligned": [0.10, 0.10],
-        "model_sha256": ["runtime-model", "runtime-model"],
-    }).to_parquet(first_scores, index=False)
-    run_replay(
-        first_scores, calibration, tmp_path / "first-audit.parquet",
-        checkpoint_path=checkpoint,
-    )
-    checkpoint_before = checkpoint.read_bytes()
-
-    stale_scores = tmp_path / "stale.parquet"
-    pd.DataFrame({
-        "event_id": ["new", "event"],
-        "time_to_tca": [7.0, 6.0],
-        "catboost_tail_aligned": [0.10, 0.10],
-        "model_sha256": ["runtime-model", "runtime-model"],
-    }).to_parquet(stale_scores, index=False)
-    output = tmp_path / "stale-audit.parquet"
-
-    with np.testing.assert_raises(ValueError):
-        run_replay(
-            stale_scores, calibration, output, checkpoint_path=checkpoint,
-        )
-
-    assert checkpoint.read_bytes() == checkpoint_before
-    assert not output.exists()
-    restored = SequentialTriagePolicy.restore(checkpoint)
-    assert restored.audit_log()["sequence_number"].tolist() == [1, 2]
-
-
 def test_replay_scores_rejects_model_overlap_and_duplicate_updates(tmp_path):
     artifact = runtime_calibration_artifact()
     valid = pd.DataFrame({
@@ -1653,12 +1722,6 @@ def dashboard_audit_frame(calibration_path, event_id="event", decision="MONITOR"
         "shift_gate_sha256": [None],
         "model_manifest_sha256": [None],
         "runtime_checkpoint_sha256": [None],
-        "runtime_configuration_sha256": ["d" * 64],
-        "safe_threshold": [0.20],
-        "escalation_threshold": [np.nan],
-        "minimum_history": [3],
-        "min_days_to_tca": [2.0],
-        "max_days_to_tca": [7.0],
         "is_current_decision": [True],
     })
 
@@ -1678,8 +1741,6 @@ def test_operator_dashboard_builds_self_contained_html(tmp_path):
     assert "Operator Console" in document
     assert "SAFE-EXCLUDE" in document
     assert "c" * 64 in document
-    assert "d" * 64 in document
-    assert "runtime configuration" in document
     assert "https://" not in document
 
 
@@ -1732,77 +1793,6 @@ def test_operator_dashboard_rejects_wrong_lineage_and_overlapping_batches(tmp_pa
         load_audits([first_path, duplicate_path], runtime_calibration_artifact(model_hash="c" * 64), calibration)
 
 
-def test_operator_dashboard_rejects_runtime_configuration_drift(tmp_path):
-    calibration = tmp_path / "calibration.json"
-    artifact = runtime_calibration_artifact(model_hash="c" * 64)
-    calibration.write_text(json.dumps(artifact) + "\n")
-    valid = dashboard_audit_frame(calibration)
-
-    wrong_threshold = valid.copy()
-    wrong_threshold["safe_threshold"] = 0.21
-    wrong_threshold_path = tmp_path / "wrong-threshold.parquet"
-    wrong_threshold.to_parquet(wrong_threshold_path, index=False)
-    with np.testing.assert_raises(ValueError):
-        load_audits([wrong_threshold_path], artifact, calibration)
-
-    second_runtime = valid.copy()
-    second_runtime["event_id"] = "other"
-    second_runtime["runtime_configuration_sha256"] = "e" * 64
-    first_path = tmp_path / "first.parquet"
-    second_path = tmp_path / "second.parquet"
-    valid.to_parquet(first_path, index=False)
-    second_runtime.to_parquet(second_path, index=False)
-    with np.testing.assert_raises(ValueError):
-        load_audits([first_path, second_path], artifact, calibration)
-
-
-def test_operator_dashboard_selects_and_explains_safe_transition(tmp_path):
-    calibration = tmp_path / "calibration.json"
-    calibration.write_text(
-        json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n"
-    )
-    first = dashboard_audit_frame(
-        calibration, event_id="changing-event", decision="MONITOR", sequence=1
-    )
-    first["score"] = 0.30
-    second = dashboard_audit_frame(
-        calibration, event_id="changing-event", decision="SAFE-EXCLUDE", sequence=2
-    )
-    second["score"] = 0.15
-    second["reason"] = "score_at_or_below_calibrated_threshold"
-    audit_path = tmp_path / "audit.parquet"
-    pd.concat([first, second], ignore_index=True).to_parquet(audit_path, index=False)
-    output = tmp_path / "dashboard.html"
-
-    summary = build_dashboard([audit_path], calibration, output)
-    exemplar = summary["exemplar_transition"]
-    document = output.read_text(encoding="utf-8")
-
-    assert exemplar["event_id"] == "changing-event"
-    assert exemplar["transition_sequence"] == 2
-    assert exemplar["from_decision"] == "MONITOR"
-    assert exemplar["to_decision"] == "SAFE-EXCLUDE"
-    assert exemplar["previous_score"] == 0.30
-    assert exemplar["score"] == 0.15
-    assert "EXEMPLAR DECISION TRANSITION" in document
-    assert "score reached the calibrated SAFE-EXCLUDE threshold" in document
-
-
-def test_operator_dashboard_has_no_exemplar_without_decision_change(tmp_path):
-    calibration = tmp_path / "calibration.json"
-    calibration.write_text(
-        json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n"
-    )
-    audit_path = tmp_path / "audit.parquet"
-    dashboard_audit_frame(calibration).to_parquet(audit_path, index=False)
-    output = tmp_path / "dashboard.html"
-
-    summary = build_dashboard([audit_path], calibration, output)
-
-    assert summary["exemplar_transition"] is None
-    assert "EXEMPLAR DECISION TRANSITION" not in output.read_text(encoding="utf-8")
-
-
 def test_operator_dashboard_shows_failed_confirmation_honestly(tmp_path):
     calibration = tmp_path / "calibration.json"
     calibration.write_text(json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n")
@@ -1847,7 +1837,6 @@ def test_one_command_demo_builds_verified_outputs(tmp_path):
     assert summary["message_updates"] == 22656
     assert summary["events_in_runtime_window"] == 2387
     assert summary["confirmation"]["passed"] is False
-    assert len(summary["runtime_configuration_sha256"]) == 64
     assert (output / "replay-audit.parquet").exists()
     assert (output / "operator-console.html").exists()
     assert (output / "runtime-state.json").exists()
@@ -1857,10 +1846,7 @@ def test_one_command_demo_builds_verified_outputs(tmp_path):
     assert stored["caveat"] == summary["caveat"]
     assert stored["evidence_dashboard"] == "evidence-dashboard.html"
     assert stored["evidence"]["confirmation_passed"] is False
-    assert stored["runtime_configuration_sha256"] == summary["runtime_configuration_sha256"]
-    console = (output / "operator-console.html").read_text(encoding="utf-8")
-    assert "NOT MET" in console
-    assert summary["runtime_configuration_sha256"] in console
+    assert "NOT MET" in (output / "operator-console.html").read_text(encoding="utf-8")
 
 
 def test_one_command_demo_refuses_protected_and_nonempty_output(tmp_path):

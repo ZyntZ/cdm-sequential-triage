@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -301,12 +302,24 @@ def read_json(path: str | Path) -> dict[str, Any]:
 def write_json(path: str | Path, payload: dict[str, Any]) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(target.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(target)
+    raw = (json.dumps(
+        payload, ensure_ascii=False, indent=2, allow_nan=False
+    ) + "\n").encode("utf-8")
+    temporary_name = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=target.parent, prefix=f".{target.name}.",
+            suffix=".tmp", delete=False,
+        ) as stream:
+            temporary_name = stream.name
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, target)
+        temporary_name = None
+    finally:
+        if temporary_name is not None:
+            Path(temporary_name).unlink(missing_ok=True)
 
 
 def acquire_confirmation_lock(path: str | Path, payload: dict[str, Any]) -> None:
@@ -317,6 +330,12 @@ def acquire_confirmation_lock(path: str | Path, payload: dict[str, Any]) -> None
         descriptor = os.open(target, flags, 0o644)
     except FileExistsError as error:
         raise RuntimeError(f"Confirmation lock already exists: {target}") from error
-    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-        json.dump(payload, stream, ensure_ascii=False, indent=2, allow_nan=False)
-        stream.write("\n")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2, allow_nan=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise

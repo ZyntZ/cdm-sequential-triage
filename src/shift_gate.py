@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -176,12 +178,24 @@ class ConformalShiftGate:
     def save(self, path: str | Path) -> None:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_suffix(target.suffix + ".tmp")
-        temporary.write_text(
-            json.dumps(self.to_payload(), indent=2, allow_nan=False) + "\n",
-            encoding="utf-8",
-        )
-        temporary.replace(target)
+        raw = (json.dumps(
+            self.to_payload(), indent=2, allow_nan=False
+        ) + "\n").encode("utf-8")
+        temporary_name = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", dir=target.parent, prefix=f".{target.name}.",
+                suffix=".tmp", delete=False,
+            ) as stream:
+                temporary_name = stream.name
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_name, target)
+            temporary_name = None
+        finally:
+            if temporary_name is not None:
+                Path(temporary_name).unlink(missing_ok=True)
 
     @classmethod
     def load(cls, path: str | Path) -> "ConformalShiftGate":
