@@ -49,6 +49,16 @@ Development tuning is closed after v11. The next-study candidate is frozen in `a
 
 The preregistered score model is now trained on the full development partition and stored as `artifacts/catboost_tail_aligned_final_v13.cbm`. Its SHA-256 is `9607c64be397229a9814131d5011e80a7df28d62a51abe514e8b7814e6d67e72`. Fresh five-fold inner-OOF dynamic scores were generated on the development events to define the frozen positive-tail weights before the final fit. The manifest records 66,592 prefixes, 7,146 events, 192 positives, 500 trees, and no calibration or evaluation access. The model has no decision threshold; PAC calibration on genuinely new events is still required.
 
+## Quick historical demo
+
+Build the locked `confirmation_v1` replay audit and self-contained operator console with one command:
+
+```bash
+python scripts/run_demo.py --output-dir /tmp/cdm-sequential-triage-demo
+```
+
+The command writes `replay-audit.parquet`, `runtime-state.json`, `operator-console.html`, and `summary.json` into a fresh output directory outside source and artifact folders. It refuses non-empty or protected destinations and removes staged output if either replay or dashboard generation fails. The demo is label-blind historical runtime evidence only: `confirmation_v1` did not meet its pre-specified 10% UCB criterion and does not validate the v13 candidate.
+
 ## Reproducibility
 - Dataset source/checksums: `data/manifest.json`
 - Statistical protocol: `PROTOCOL.md`

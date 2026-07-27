@@ -25,6 +25,7 @@ from train_final_tail_aligned import read_locked_candidate
 from score_final_tail_aligned import score_file as score_tail_file
 from replay_scores import load_runtime, replay_scores, run_replay, validate_score_stream
 from operator_dashboard import build_dashboard, current_events, load_audits
+from run_demo import run_demo
 from confirm_policy import calibration_command
 from validation_plan import (
     evaluation_planning_table, maximum_passing_failures,
@@ -1634,3 +1635,50 @@ def test_operator_dashboard_refuses_overwrite(tmp_path):
     with np.testing.assert_raises(FileExistsError):
         build_dashboard([audit_path], calibration, output)
     assert output.read_text(encoding="utf-8") == "sentinel"
+
+
+def test_one_command_demo_builds_verified_outputs(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    output = tmp_path / "historical-demo"
+
+    summary = run_demo(output, root=root)
+
+    assert summary["status"] == "historical-demo-not-for-operations"
+    assert summary["message_updates"] == 22656
+    assert summary["events_in_runtime_window"] == 2387
+    assert summary["confirmation"]["passed"] is False
+    assert (output / "replay-audit.parquet").exists()
+    assert (output / "operator-console.html").exists()
+    assert (output / "runtime-state.json").exists()
+    assert (output / "summary.json").exists()
+    stored = json.loads((output / "summary.json").read_text(encoding="utf-8"))
+    assert stored["caveat"] == summary["caveat"]
+    assert "NOT MET" in (output / "operator-console.html").read_text(encoding="utf-8")
+
+
+def test_one_command_demo_refuses_protected_and_nonempty_output(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    with np.testing.assert_raises(ValueError):
+        run_demo(root / "artifacts" / "demo", root=root)
+
+    output = tmp_path / "existing"
+    output.mkdir()
+    (output / "keep.txt").write_text("sentinel", encoding="utf-8")
+    with np.testing.assert_raises(FileExistsError):
+        run_demo(output, root=root)
+    assert (output / "keep.txt").read_text(encoding="utf-8") == "sentinel"
+
+
+def test_one_command_demo_cleans_staging_on_failure(tmp_path, monkeypatch):
+    import run_demo as demo_module
+    root = Path(__file__).resolve().parents[1]
+    output = tmp_path / "failed-demo"
+
+    def fail_dashboard(*args, **kwargs):
+        raise OSError("simulated dashboard failure")
+
+    monkeypatch.setattr(demo_module, "build_dashboard", fail_dashboard)
+    with np.testing.assert_raises(OSError):
+        demo_module.run_demo(output, root=root)
+    assert not output.exists()
+    assert not list(tmp_path.glob(".failed-demo.*"))
