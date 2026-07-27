@@ -23,7 +23,10 @@ from repeated_calibration_stability import (
 from freeze_next_validation import freeze_plan
 from train_final_tail_aligned import read_locked_candidate
 from score_final_tail_aligned import score_file as score_tail_file
-from replay_scores import load_runtime, replay_scores, run_replay, validate_score_stream
+from replay_scores import (
+    load_runtime, replay_scores, run_replay, validate_runtime_continuation,
+    validate_score_stream,
+)
 from operator_dashboard import build_dashboard, current_events, load_audits
 from evidence_dashboard import build_evidence_dashboard
 from run_demo import run_demo
@@ -1722,6 +1725,12 @@ def dashboard_audit_frame(calibration_path, event_id="event", decision="MONITOR"
         "shift_gate_sha256": [None],
         "model_manifest_sha256": [None],
         "runtime_checkpoint_sha256": [None],
+        "runtime_configuration_sha256": ["d" * 64],
+        "safe_threshold": [0.20],
+        "escalation_threshold": [np.nan],
+        "minimum_history": [3],
+        "min_days_to_tca": [2.0],
+        "max_days_to_tca": [7.0],
         "is_current_decision": [True],
     })
 
@@ -1919,3 +1928,142 @@ def test_evidence_dashboard_verifies_preregistration_lock(tmp_path):
     prereg.write_text(prereg.read_text(encoding="utf-8") + " ", encoding="utf-8")
     with np.testing.assert_raises(ValueError):
         build_evidence_dashboard(copy_root, tmp_path / "evidence.html")
+
+
+
+def test_checkpoint_v2_persists_processed_batch_ledger(tmp_path):
+    policy = SequentialTriagePolicy(safe_threshold=0.20)
+    policy.update("event", 7.0, 0.10)
+    policy.record_processed_batch(
+        scores_sha256="a" * 64,
+        calibration_sha256="b" * 64,
+        rows=1,
+        events=1,
+        min_time_to_tca=7.0,
+        max_time_to_tca=7.0,
+        first_audit_row=1,
+        last_audit_row=1,
+    )
+    checkpoint = tmp_path / "runtime.json"
+    policy.checkpoint(checkpoint)
+
+    envelope = json.loads(checkpoint.read_text(encoding="utf-8"))
+    restored = SequentialTriagePolicy.restore(checkpoint)
+
+    assert envelope["payload"]["schema_version"] == 2
+    assert restored.processed_batches() == policy.processed_batches()
+    assert restored.has_processed_batch("a" * 64)
+
+
+def test_checkpoint_v1_restores_and_upgrades_to_v2(tmp_path):
+    policy = SequentialTriagePolicy(safe_threshold=0.20)
+    policy.update("event", 7.0, 0.10)
+    checkpoint = tmp_path / "runtime.json"
+    policy.checkpoint(checkpoint)
+    envelope = json.loads(checkpoint.read_text(encoding="utf-8"))
+    envelope["payload"]["schema_version"] = 1
+    envelope["payload"].pop("processed_batches")
+    canonical = json.dumps(
+        envelope["payload"], sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    import hashlib
+    envelope["checkpoint_sha256"] = hashlib.sha256(canonical).hexdigest()
+    checkpoint.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
+
+    restored = SequentialTriagePolicy.restore(checkpoint)
+    assert restored.processed_batches() == []
+
+    restored.checkpoint(checkpoint)
+    upgraded = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert upgraded["payload"]["schema_version"] == 2
+    assert upgraded["payload"]["processed_batches"] == []
+
+
+def test_replay_ledger_accumulates_across_checkpoint_resumes(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(runtime_calibration_artifact()) + "\n")
+    checkpoint = tmp_path / "runtime.json"
+    first_scores = tmp_path / "first.parquet"
+    second_scores = tmp_path / "second.parquet"
+    pd.DataFrame({
+        "event_id": [1, 1],
+        "time_to_tca": [7.0, 6.0],
+        "catboost_tail_aligned": [0.10, 0.10],
+        "model_sha256": ["runtime-model"] * 2,
+    }).to_parquet(first_scores, index=False)
+    pd.DataFrame({
+        "event_id": [1, 2],
+        "time_to_tca": [5.0, 7.0],
+        "catboost_tail_aligned": [0.10, 0.90],
+        "model_sha256": ["runtime-model"] * 2,
+    }).to_parquet(second_scores, index=False)
+
+    run_replay(
+        first_scores, calibration, tmp_path / "first-audit.parquet",
+        checkpoint_path=checkpoint,
+    )
+    run_replay(
+        second_scores, calibration, tmp_path / "second-audit.parquet",
+        checkpoint_path=checkpoint,
+    )
+    restored = SequentialTriagePolicy.restore(checkpoint)
+    ledger = restored.processed_batches()
+
+    assert len(ledger) == 2
+    assert [entry["rows"] for entry in ledger] == [2, 2]
+    assert [entry["events"] for entry in ledger] == [1, 2]
+    assert [(entry["first_audit_row"], entry["last_audit_row"]) for entry in ledger] == [(1, 2), (3, 4)]
+    assert ledger[0]["scores_sha256"] != ledger[1]["scores_sha256"]
+
+
+def test_replay_rejects_processed_score_batch_before_state_change(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(runtime_calibration_artifact()) + "\n")
+    scores = tmp_path / "scores.parquet"
+    pd.DataFrame({
+        "event_id": [1],
+        "time_to_tca": [7.0],
+        "catboost_tail_aligned": [0.10],
+        "model_sha256": ["runtime-model"],
+    }).to_parquet(scores, index=False)
+    checkpoint = tmp_path / "runtime.json"
+    run_replay(
+        scores, calibration, tmp_path / "first-audit.parquet",
+        checkpoint_path=checkpoint,
+    )
+    before = checkpoint.read_bytes()
+
+    with np.testing.assert_raises(ValueError):
+        run_replay(
+            scores, calibration, tmp_path / "duplicate-audit.parquet",
+            checkpoint_path=checkpoint,
+        )
+
+    assert checkpoint.read_bytes() == before
+    assert not (tmp_path / "duplicate-audit.parquet").exists()
+    restored = SequentialTriagePolicy.restore(checkpoint)
+    assert len(restored.audit_log()) == 1
+    assert len(restored.processed_batches()) == 1
+
+
+def test_checkpoint_integrity_covers_processed_batch_ledger(tmp_path):
+    policy = SequentialTriagePolicy(safe_threshold=0.20)
+    policy.update("event", 7.0, 0.10)
+    policy.record_processed_batch(
+        scores_sha256="a" * 64,
+        calibration_sha256="b" * 64,
+        rows=1,
+        events=1,
+        min_time_to_tca=7.0,
+        max_time_to_tca=7.0,
+        first_audit_row=1,
+        last_audit_row=1,
+    )
+    checkpoint = tmp_path / "runtime.json"
+    policy.checkpoint(checkpoint)
+    envelope = json.loads(checkpoint.read_text(encoding="utf-8"))
+    envelope["payload"]["processed_batches"][0]["rows"] = 2
+    checkpoint.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
+
+    with np.testing.assert_raises(ValueError):
+        SequentialTriagePolicy.restore(checkpoint)

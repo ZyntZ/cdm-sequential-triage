@@ -46,6 +46,21 @@ class TriageDecision:
         return record
 
 
+@dataclass(frozen=True)
+class ProcessedBatch:
+    scores_sha256: str
+    calibration_sha256: str
+    rows: int
+    events: int
+    min_time_to_tca: float
+    max_time_to_tca: float
+    first_audit_row: int
+    last_audit_row: int
+
+    def to_record(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 class SequentialTriagePolicy:
     """Apply a three-way policy to causally ordered event updates.
 
@@ -89,6 +104,7 @@ class SequentialTriagePolicy:
         self._eligible_counts: dict[Any, int] = {}
         self._last_tca: dict[Any, float] = {}
         self._audit: list[TriageDecision] = []
+        self._processed_batches: list[ProcessedBatch] = []
 
     def update(
         self,
@@ -175,6 +191,70 @@ class SequentialTriagePolicy:
     def continuation_limits(self) -> dict[Any, float]:
         """Return the last accepted TCA for every active event."""
         return dict(self._last_tca)
+
+    def processed_batches(self) -> list[dict[str, Any]]:
+        """Return a copy of the persisted input-batch provenance ledger."""
+        return [entry.to_record() for entry in self._processed_batches]
+
+    def has_processed_batch(self, scores_sha256: str) -> bool:
+        return any(
+            entry.scores_sha256 == scores_sha256
+            for entry in self._processed_batches
+        )
+
+    def record_processed_batch(
+        self,
+        *,
+        scores_sha256: str,
+        calibration_sha256: str,
+        rows: int,
+        events: int,
+        min_time_to_tca: float,
+        max_time_to_tca: float,
+        first_audit_row: int,
+        last_audit_row: int,
+        _require_current_tail: bool = True,
+    ) -> None:
+        """Append validated batch provenance before checkpoint publication."""
+        for name, value in (
+            ("scores_sha256", scores_sha256),
+            ("calibration_sha256", calibration_sha256),
+        ):
+            if not isinstance(value, str) or len(value) != 64:
+                raise ValueError(f"{name} must be a 64-character SHA-256")
+            try:
+                int(value, 16)
+            except ValueError as error:
+                raise ValueError(f"{name} must be hexadecimal") from error
+        if self.has_processed_batch(scores_sha256):
+            raise ValueError("Score batch has already been processed")
+        rows, events = int(rows), int(events)
+        first_audit_row, last_audit_row = int(first_audit_row), int(last_audit_row)
+        min_tca, max_tca = float(min_time_to_tca), float(max_time_to_tca)
+        if rows < 1 or events < 1 or events > rows:
+            raise ValueError("Processed batch row/event counts are invalid")
+        if not np.isfinite(min_tca) or not np.isfinite(max_tca) or min_tca > max_tca:
+            raise ValueError("Processed batch TCA bounds are invalid")
+        if first_audit_row < 1 or last_audit_row - first_audit_row + 1 != rows:
+            raise ValueError("Processed batch audit row range is invalid")
+        if self._processed_batches:
+            expected_first = self._processed_batches[-1].last_audit_row + 1
+            if first_audit_row != expected_first:
+                raise ValueError("Processed batch audit ranges must be contiguous")
+        elif first_audit_row != 1:
+            raise ValueError("The first processed batch must start at audit row one")
+        if _require_current_tail and last_audit_row != len(self._audit):
+            raise ValueError("Processed batch must cover the current audit tail")
+        self._processed_batches.append(ProcessedBatch(
+            scores_sha256=scores_sha256,
+            calibration_sha256=calibration_sha256,
+            rows=rows,
+            events=events,
+            min_time_to_tca=min_tca,
+            max_time_to_tca=max_tca,
+            first_audit_row=first_audit_row,
+            last_audit_row=last_audit_row,
+        ))
 
     def reset_event(self, event_id: Any) -> None:
         """Forget runtime state for one event without deleting its audit records."""
@@ -284,10 +364,13 @@ class SequentialTriagePolicy:
             record["shift_score"] = self._encode_float(decision.shift_score)
             audit.append(record)
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "configuration": self._configuration_payload(),
             "state": state,
             "audit": audit,
+            "processed_batches": [
+                entry.to_record() for entry in self._processed_batches
+            ],
         }
         canonical = json.dumps(
             payload, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -334,7 +417,8 @@ class SequentialTriagePolicy:
         digest = hashlib.sha256(canonical).hexdigest()
         if envelope.get("checkpoint_sha256") != digest:
             raise ValueError("Checkpoint integrity validation failed")
-        if payload.get("schema_version") != 1:
+        schema_version = payload.get("schema_version")
+        if schema_version not in {1, 2}:
             raise ValueError("Unsupported checkpoint schema version")
         configuration = payload.get("configuration")
         if not isinstance(configuration, dict):
@@ -395,4 +479,15 @@ class SequentialTriagePolicy:
                 decision_window_eligible=bool(record["decision_window_eligible"]),
                 eligible_history_count=eligible_count,
             ))
+        batch_records = [] if schema_version == 1 else payload.get("processed_batches")
+        if not isinstance(batch_records, list):
+            raise ValueError("Checkpoint processed batch ledger is invalid")
+        for record in batch_records:
+            if not isinstance(record, dict):
+                raise ValueError("Checkpoint processed batch entry is invalid")
+            policy.record_processed_batch(
+                **record, _require_current_tail=False
+            )
+        if batch_records and policy._processed_batches[-1].last_audit_row != len(policy._audit):
+            raise ValueError("Checkpoint batch ledger does not cover the audit log")
         return policy

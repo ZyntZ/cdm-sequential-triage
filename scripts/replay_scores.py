@@ -119,24 +119,23 @@ def validate_runtime_continuation(
     scores: pd.DataFrame,
     runtime: SequentialTriagePolicy,
 ) -> None:
-    """Reject stale or repeated updates before any runtime state is changed."""
+    """Reject stale or repeated updates before runtime state is changed."""
     required = {"event_id", "time_to_tca"}
     missing = required.difference(scores.columns)
     if missing:
         raise ValueError(f"Missing continuation columns: {sorted(missing)}")
     limits = runtime.continuation_limits()
-    incoming_last = dict(limits)
     for event_id, time_to_tca in scores.loc[:, ["event_id", "time_to_tca"]].itertuples(
         index=False, name=None
     ):
         tca = float(time_to_tca)
-        previous_tca = incoming_last.get(event_id)
+        previous_tca = limits.get(event_id)
         if previous_tca is not None and tca >= previous_tca:
             raise ValueError(
                 "Runtime stream repeats or predates an accepted update for "
                 f"event_id={event_id!r}"
             )
-        incoming_last[event_id] = tca
+        limits[event_id] = tca
 
 
 def replay_scores(
@@ -204,6 +203,10 @@ def run_replay(
         checkpoint_path=checkpoint_path,
         escalation_threshold=escalation_threshold,
     )
+    scores_sha256 = file_sha256(scores_path)
+    calibration_sha256 = file_sha256(calibration_path)
+    if runtime.has_processed_batch(scores_sha256):
+        raise ValueError("Score batch has already been processed")
     scores = pd.read_parquet(scores_path)
     ordered = validate_score_stream(
         scores, artifact, policy_config["score_column"], runtime.shift_gate
@@ -213,8 +216,8 @@ def run_replay(
     audit = complete_audit.iloc[prior_audit_rows:].reset_index(drop=True).copy()
     if len(audit) != len(ordered):
         raise RuntimeError("Replay audit row count does not match the accepted input stream")
-    audit["scores_sha256"] = file_sha256(scores_path)
-    audit["calibration_sha256"] = file_sha256(calibration_path)
+    audit["scores_sha256"] = scores_sha256
+    audit["calibration_sha256"] = calibration_sha256
     audit["model_sha256"] = str(artifact["model_sha256"])
     audit["shift_gate_sha256"] = artifact.get("shift_gate_sha256")
     audit["model_manifest_sha256"] = artifact.get("model_manifest_sha256")
@@ -225,6 +228,16 @@ def run_replay(
     audit["min_days_to_tca"] = runtime.min_days_to_tca
     audit["max_days_to_tca"] = runtime.max_days_to_tca
     audit["is_current_decision"] = ~audit["event_id"].duplicated(keep="last")
+    runtime.record_processed_batch(
+        scores_sha256=scores_sha256,
+        calibration_sha256=calibration_sha256,
+        rows=len(ordered),
+        events=int(ordered["event_id"].nunique()),
+        min_time_to_tca=float(ordered["time_to_tca"].min()),
+        max_time_to_tca=float(ordered["time_to_tca"].max()),
+        first_audit_row=prior_audit_rows + 1,
+        last_audit_row=prior_audit_rows + len(ordered),
+    )
 
     checkpoint_digest = None
     staged_checkpoint = None
