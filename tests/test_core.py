@@ -1831,6 +1831,90 @@ def test_operator_dashboard_shows_failed_confirmation_honestly(tmp_path):
     assert "does not validate" in document
 
 
+def test_operator_dashboard_verifies_processed_batch_chain(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(
+        json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n"
+    )
+    scores = tmp_path / "scores.parquet"
+    pd.DataFrame({
+        "event_id": ["event", "event", "event"],
+        "time_to_tca": [7.0, 6.0, 5.0],
+        "catboost_tail_aligned": [0.10, 0.10, 0.10],
+        "model_sha256": ["c" * 64] * 3,
+    }).to_parquet(scores, index=False)
+    audit_path = tmp_path / "audit.parquet"
+    checkpoint = tmp_path / "runtime.json"
+    run_replay(
+        scores, calibration, audit_path, checkpoint_path=checkpoint,
+    )
+    output = tmp_path / "dashboard.html"
+
+    summary = build_dashboard(
+        [audit_path], calibration, output, checkpoint_path=checkpoint,
+    )
+    document = output.read_text(encoding="utf-8")
+
+    assert summary["chain"]["status"] == "VERIFIED"
+    assert summary["chain"]["length"] == 1
+    assert len(summary["chain"]["head_sha256"]) == 64
+    assert "Batch chain" in document
+    assert "VERIFIED" in document
+    assert summary["chain"]["head_sha256"][:16] in document
+
+
+def test_operator_dashboard_rejects_checkpoint_audit_mismatch(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(
+        json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n"
+    )
+    scores = tmp_path / "scores.parquet"
+    pd.DataFrame({
+        "event_id": ["event"],
+        "time_to_tca": [7.0],
+        "catboost_tail_aligned": [0.10],
+        "model_sha256": ["c" * 64],
+    }).to_parquet(scores, index=False)
+    audit_path = tmp_path / "audit.parquet"
+    checkpoint = tmp_path / "runtime.json"
+    run_replay(scores, calibration, audit_path, checkpoint_path=checkpoint)
+    audit = pd.read_parquet(audit_path)
+    audit["runtime_checkpoint_sha256"] = "0" * 64
+    audit.to_parquet(audit_path, index=False)
+
+    with np.testing.assert_raises(ValueError):
+        build_dashboard(
+            [audit_path], calibration, tmp_path / "dashboard.html",
+            checkpoint_path=checkpoint,
+        )
+
+
+def test_operator_dashboard_rejects_tampered_checkpoint(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(
+        json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n"
+    )
+    scores = tmp_path / "scores.parquet"
+    pd.DataFrame({
+        "event_id": ["event"],
+        "time_to_tca": [7.0],
+        "catboost_tail_aligned": [0.10],
+        "model_sha256": ["c" * 64],
+    }).to_parquet(scores, index=False)
+    audit_path = tmp_path / "audit.parquet"
+    checkpoint = tmp_path / "runtime.json"
+    run_replay(scores, calibration, audit_path, checkpoint_path=checkpoint)
+    envelope = json.loads(checkpoint.read_text(encoding="utf-8"))
+    envelope["payload"]["processed_batches"][0]["rows"] = 2
+    checkpoint.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
+
+    with np.testing.assert_raises(ValueError):
+        build_dashboard(
+            [audit_path], calibration, tmp_path / "dashboard.html",
+            checkpoint_path=checkpoint,
+        )
+
+
 def test_operator_dashboard_refuses_overwrite(tmp_path):
     calibration = tmp_path / "calibration.json"
     calibration.write_text(json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n")
@@ -1853,6 +1937,9 @@ def test_one_command_demo_builds_verified_outputs(tmp_path):
     assert summary["message_updates"] == 22656
     assert summary["events_in_runtime_window"] == 2387
     assert summary["confirmation"]["passed"] is False
+    assert summary["batch_chain"]["status"] == "VERIFIED"
+    assert summary["batch_chain"]["length"] == 1
+    assert len(summary["batch_chain"]["head_sha256"]) == 64
     assert (output / "replay-audit.parquet").exists()
     assert (output / "operator-console.html").exists()
     assert (output / "runtime-state.json").exists()
@@ -1862,7 +1949,11 @@ def test_one_command_demo_builds_verified_outputs(tmp_path):
     assert stored["caveat"] == summary["caveat"]
     assert stored["evidence_dashboard"] == "evidence-dashboard.html"
     assert stored["evidence"]["confirmation_passed"] is False
-    assert "NOT MET" in (output / "operator-console.html").read_text(encoding="utf-8")
+    assert stored["batch_chain"] == summary["batch_chain"]
+    console = (output / "operator-console.html").read_text(encoding="utf-8")
+    assert "NOT MET" in console
+    assert "Batch chain" in console
+    assert "VERIFIED" in console
 
 
 def test_one_command_demo_refuses_protected_and_nonempty_output(tmp_path):

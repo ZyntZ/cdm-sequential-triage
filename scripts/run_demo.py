@@ -54,6 +54,7 @@ def run_demo(output_dir: Path, root: Path = ROOT) -> dict:
         dashboard = build_dashboard(
             [audit_path], calibration, console_path,
             confirmation_path=confirmation,
+            checkpoint_path=checkpoint_path,
         )
         evidence = build_evidence_dashboard(root, evidence_path)
         summary = {
@@ -66,13 +67,11 @@ def run_demo(output_dir: Path, root: Path = ROOT) -> dict:
             "evidence": evidence,
             "message_updates": int(len(audit)),
             "events_in_runtime_window": int(audit["event_id"].nunique()),
-            "runtime_configuration_sha256": str(
-                audit["runtime_configuration_sha256"].iloc[0]
-            ),
             "message_decisions": {
                 key: int(value) for key, value in audit["decision"].value_counts().items()
             },
             "current_event_decisions": dashboard["current_decisions"],
+            "batch_chain": dashboard["chain"],
             "confirmation": dashboard["confirmation"],
             "caveat": (
                 "confirmation_v1 did not meet the pre-specified UCB criterion; "
