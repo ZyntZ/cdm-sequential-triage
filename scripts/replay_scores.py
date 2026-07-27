@@ -119,23 +119,24 @@ def validate_runtime_continuation(
     scores: pd.DataFrame,
     runtime: SequentialTriagePolicy,
 ) -> None:
-    """Reject stale or repeated updates before runtime state is changed."""
+    """Reject stale or repeated updates before any runtime state is changed."""
     required = {"event_id", "time_to_tca"}
     missing = required.difference(scores.columns)
     if missing:
         raise ValueError(f"Missing continuation columns: {sorted(missing)}")
     limits = runtime.continuation_limits()
+    incoming_last = dict(limits)
     for event_id, time_to_tca in scores.loc[:, ["event_id", "time_to_tca"]].itertuples(
         index=False, name=None
     ):
         tca = float(time_to_tca)
-        previous_tca = limits.get(event_id)
+        previous_tca = incoming_last.get(event_id)
         if previous_tca is not None and tca >= previous_tca:
             raise ValueError(
                 "Runtime stream repeats or predates an accepted update for "
                 f"event_id={event_id!r}"
             )
-        limits[event_id] = tca
+        incoming_last[event_id] = tca
 
 
 def replay_scores(

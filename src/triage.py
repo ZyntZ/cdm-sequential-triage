@@ -56,6 +56,8 @@ class ProcessedBatch:
     max_time_to_tca: float
     first_audit_row: int
     last_audit_row: int
+    previous_entry_sha256: str | None
+    entry_sha256: str
 
     def to_record(self) -> dict[str, Any]:
         return asdict(self)
@@ -202,6 +204,27 @@ class SequentialTriagePolicy:
             for entry in self._processed_batches
         )
 
+    @staticmethod
+    def _processed_batch_entry_sha256(record: Mapping[str, Any]) -> str:
+        material = {
+            key: record[key]
+            for key in (
+                "scores_sha256", "calibration_sha256", "rows", "events",
+                "min_time_to_tca", "max_time_to_tca", "first_audit_row",
+                "last_audit_row", "previous_entry_sha256",
+            )
+        }
+        canonical = json.dumps(
+            material, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    def processed_batch_chain_head(self) -> str | None:
+        """Return the verified head hash of the processed-batch ledger."""
+        if not self._processed_batches:
+            return None
+        return self._processed_batches[-1].entry_sha256
+
     def record_processed_batch(
         self,
         *,
@@ -213,6 +236,8 @@ class SequentialTriagePolicy:
         max_time_to_tca: float,
         first_audit_row: int,
         last_audit_row: int,
+        previous_entry_sha256: str | None = None,
+        entry_sha256: str | None = None,
         _require_current_tail: bool = True,
     ) -> None:
         """Append validated batch provenance before checkpoint publication."""
@@ -254,15 +279,43 @@ class SequentialTriagePolicy:
             raise ValueError("Processed batch range exceeds the audit log")
         if _require_current_tail and last_audit_row != len(self._audit):
             raise ValueError("Processed batch must cover the current audit tail")
+        expected_previous = (
+            None if not self._processed_batches
+            else self._processed_batches[-1].entry_sha256
+        )
+        chain_values_supplied = (
+            previous_entry_sha256 is not None or entry_sha256 is not None
+        )
+        if previous_entry_sha256 is not None:
+            if (
+                not isinstance(previous_entry_sha256, str)
+                or len(previous_entry_sha256) != 64
+            ):
+                raise ValueError("previous_entry_sha256 must be null or a SHA-256")
+            try:
+                int(previous_entry_sha256, 16)
+            except ValueError as error:
+                raise ValueError("previous_entry_sha256 must be hexadecimal") from error
+        if chain_values_supplied and previous_entry_sha256 != expected_previous:
+            raise ValueError("Processed batch ledger previous hash does not match")
+        previous_entry_sha256 = expected_previous
+        material = {
+            "scores_sha256": scores_sha256,
+            "calibration_sha256": calibration_sha256,
+            "rows": rows,
+            "events": events,
+            "min_time_to_tca": min_tca,
+            "max_time_to_tca": max_tca,
+            "first_audit_row": first_audit_row,
+            "last_audit_row": last_audit_row,
+            "previous_entry_sha256": expected_previous,
+        }
+        expected_entry = self._processed_batch_entry_sha256(material)
+        if entry_sha256 is not None and entry_sha256 != expected_entry:
+            raise ValueError("Processed batch ledger entry hash does not match")
         self._processed_batches.append(ProcessedBatch(
-            scores_sha256=scores_sha256,
-            calibration_sha256=calibration_sha256,
-            rows=rows,
-            events=events,
-            min_time_to_tca=min_tca,
-            max_time_to_tca=max_tca,
-            first_audit_row=first_audit_row,
-            last_audit_row=last_audit_row,
+            **material,
+            entry_sha256=expected_entry,
         ))
 
     def reset_event(self, event_id: Any) -> None:
@@ -378,7 +431,7 @@ class SequentialTriagePolicy:
             record["shift_score"] = self._encode_float(decision.shift_score)
             audit.append(record)
         payload = {
-            "schema_version": 2,
+            "schema_version": 3,
             "configuration": self._configuration_payload(),
             "state": state,
             "audit": audit,
@@ -432,7 +485,7 @@ class SequentialTriagePolicy:
         if envelope.get("checkpoint_sha256") != digest:
             raise ValueError("Checkpoint integrity validation failed")
         schema_version = payload.get("schema_version")
-        if schema_version not in {1, 2}:
+        if schema_version not in {1, 2, 3}:
             raise ValueError("Unsupported checkpoint schema version")
         configuration = payload.get("configuration")
         if not isinstance(configuration, dict):
@@ -523,8 +576,13 @@ class SequentialTriagePolicy:
         for record in batch_records:
             if not isinstance(record, dict):
                 raise ValueError("Checkpoint processed batch entry is invalid")
+            restored_record = dict(record)
+            if schema_version < 3:
+                restored_record.pop("entry_sha256", None)
+                restored_record.pop("previous_entry_sha256", None)
+                restored_record["previous_entry_sha256"] = policy.processed_batch_chain_head()
             policy.record_processed_batch(
-                **record, _require_current_tail=False
+                **restored_record, _require_current_tail=False
             )
         if batch_records and policy._processed_batches[-1].last_audit_row != len(policy._audit):
             raise ValueError("Checkpoint batch ledger does not cover the audit log")

@@ -1938,7 +1938,7 @@ def test_evidence_dashboard_verifies_preregistration_lock(tmp_path):
 
 
 
-def test_checkpoint_v2_persists_processed_batch_ledger(tmp_path):
+def test_checkpoint_v3_persists_processed_batch_hash_chain(tmp_path):
     policy = SequentialTriagePolicy(safe_threshold=0.20)
     policy.update("event", 7.0, 0.10)
     policy.record_processed_batch(
@@ -1957,12 +1957,16 @@ def test_checkpoint_v2_persists_processed_batch_ledger(tmp_path):
     envelope = json.loads(checkpoint.read_text(encoding="utf-8"))
     restored = SequentialTriagePolicy.restore(checkpoint)
 
-    assert envelope["payload"]["schema_version"] == 2
+    assert envelope["payload"]["schema_version"] == 3
     assert restored.processed_batches() == policy.processed_batches()
     assert restored.has_processed_batch("a" * 64)
+    entry = restored.processed_batches()[0]
+    assert entry["previous_entry_sha256"] is None
+    assert len(entry["entry_sha256"]) == 64
+    assert restored.processed_batch_chain_head() == entry["entry_sha256"]
 
 
-def test_checkpoint_v1_restores_and_upgrades_to_v2(tmp_path):
+def test_checkpoint_v1_restores_and_upgrades_to_v3(tmp_path):
     policy = SequentialTriagePolicy(safe_threshold=0.20)
     policy.update("event", 7.0, 0.10)
     checkpoint = tmp_path / "runtime.json"
@@ -1982,7 +1986,7 @@ def test_checkpoint_v1_restores_and_upgrades_to_v2(tmp_path):
 
     restored.checkpoint(checkpoint)
     upgraded = json.loads(checkpoint.read_text(encoding="utf-8"))
-    assert upgraded["payload"]["schema_version"] == 2
+    assert upgraded["payload"]["schema_version"] == 3
     assert upgraded["payload"]["processed_batches"] == []
 
 
@@ -2021,6 +2025,9 @@ def test_replay_ledger_accumulates_across_checkpoint_resumes(tmp_path):
     assert [entry["events"] for entry in ledger] == [1, 2]
     assert [(entry["first_audit_row"], entry["last_audit_row"]) for entry in ledger] == [(1, 2), (3, 4)]
     assert ledger[0]["scores_sha256"] != ledger[1]["scores_sha256"]
+    assert ledger[0]["previous_entry_sha256"] is None
+    assert ledger[1]["previous_entry_sha256"] == ledger[0]["entry_sha256"]
+    assert restored.processed_batch_chain_head() == ledger[1]["entry_sha256"]
 
 
 def test_replay_rejects_processed_score_batch_before_state_change(tmp_path):
@@ -2162,3 +2169,97 @@ def test_processed_batch_range_cannot_exceed_audit():
             first_audit_row=1, last_audit_row=2,
             _require_current_tail=False,
         )
+
+
+
+def test_checkpoint_v2_ledger_upgrades_to_v3_hash_chain(tmp_path):
+    policy = SequentialTriagePolicy(safe_threshold=0.20)
+    policy.update("event", 7.0, 0.10)
+    policy.record_processed_batch(
+        scores_sha256="a" * 64, calibration_sha256="b" * 64,
+        rows=1, events=1, min_time_to_tca=7.0, max_time_to_tca=7.0,
+        first_audit_row=1, last_audit_row=1,
+    )
+    checkpoint = tmp_path / "runtime.json"
+    policy.checkpoint(checkpoint)
+
+    def downgrade(payload):
+        payload["schema_version"] = 2
+        for entry in payload["processed_batches"]:
+            entry.pop("entry_sha256")
+            entry.pop("previous_entry_sha256")
+
+    _rewrite_checkpoint_with_valid_digest(checkpoint, downgrade)
+    restored = SequentialTriagePolicy.restore(checkpoint)
+    ledger = restored.processed_batches()
+    assert len(ledger) == 1
+    assert ledger[0]["previous_entry_sha256"] is None
+    assert len(ledger[0]["entry_sha256"]) == 64
+
+    restored.checkpoint(checkpoint)
+    upgraded = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert upgraded["payload"]["schema_version"] == 3
+    assert len(upgraded["payload"]["processed_batches"][0]["entry_sha256"]) == 64
+
+
+def _two_batch_chain_checkpoint(tmp_path):
+    policy = SequentialTriagePolicy(safe_threshold=0.20)
+    policy.update("event", 7.0, 0.10)
+    policy.record_processed_batch(
+        scores_sha256="a" * 64, calibration_sha256="b" * 64,
+        rows=1, events=1, min_time_to_tca=7.0, max_time_to_tca=7.0,
+        first_audit_row=1, last_audit_row=1,
+    )
+    policy.update("event", 6.0, 0.10)
+    policy.record_processed_batch(
+        scores_sha256="c" * 64, calibration_sha256="b" * 64,
+        rows=1, events=1, min_time_to_tca=6.0, max_time_to_tca=6.0,
+        first_audit_row=2, last_audit_row=2,
+    )
+    checkpoint = tmp_path / "runtime.json"
+    policy.checkpoint(checkpoint)
+    return checkpoint
+
+
+def test_restore_rejects_tampered_batch_entry_with_valid_checkpoint_digest(tmp_path):
+    checkpoint = _two_batch_chain_checkpoint(tmp_path)
+    _rewrite_checkpoint_with_valid_digest(
+        checkpoint,
+        lambda payload: payload["processed_batches"][0].update({"events": 2}),
+    )
+    with np.testing.assert_raises(ValueError):
+        SequentialTriagePolicy.restore(checkpoint)
+
+
+def test_restore_rejects_broken_batch_chain_link(tmp_path):
+    checkpoint = _two_batch_chain_checkpoint(tmp_path)
+    _rewrite_checkpoint_with_valid_digest(
+        checkpoint,
+        lambda payload: payload["processed_batches"][1].update(
+            {"previous_entry_sha256": "0" * 64}
+        ),
+    )
+    with np.testing.assert_raises(ValueError):
+        SequentialTriagePolicy.restore(checkpoint)
+
+
+def test_restore_rejects_reordered_batch_chain(tmp_path):
+    checkpoint = _two_batch_chain_checkpoint(tmp_path)
+    _rewrite_checkpoint_with_valid_digest(
+        checkpoint,
+        lambda payload: payload["processed_batches"].reverse(),
+    )
+    with np.testing.assert_raises(ValueError):
+        SequentialTriagePolicy.restore(checkpoint)
+
+
+def test_restore_rejects_nonnull_genesis_link(tmp_path):
+    checkpoint = _two_batch_chain_checkpoint(tmp_path)
+    _rewrite_checkpoint_with_valid_digest(
+        checkpoint,
+        lambda payload: payload["processed_batches"][0].update(
+            {"previous_entry_sha256": "0" * 64}
+        ),
+    )
+    with np.testing.assert_raises(ValueError):
+        SequentialTriagePolicy.restore(checkpoint)
