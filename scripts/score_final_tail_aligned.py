@@ -25,6 +25,7 @@ def score_file(
     study_manifest: Path | None = None,
     study_lock: Path | None = None,
     cohort: str | None = None,
+    gate_features: tuple[str, ...] | list[str] = (),
 ) -> pd.DataFrame:
     if output_path.exists():
         raise FileExistsError(f"Score output already exists: {output_path}")
@@ -51,7 +52,12 @@ def score_file(
     model = CatBoostClassifier()
     model.load_model(str(model_path))
     score_column = manifest.get("score_column")
-    scores = score_dynamic_frame(model, features, score_column=score_column)
+    scores = score_dynamic_frame(
+        model,
+        features,
+        score_column=score_column,
+        passthrough_columns=gate_features,
+    )
     scores["model_sha256"] = actual_hash
     if study_hash is not None:
         scores["study_manifest_sha256"] = study_hash
@@ -70,11 +76,12 @@ def main() -> None:
     parser.add_argument("--study-manifest", type=Path)
     parser.add_argument("--study-lock", type=Path)
     parser.add_argument("--cohort", choices=("calibration", "evaluation"))
+    parser.add_argument("--gate-features", nargs="*", default=[])
     args = parser.parse_args()
     scores = score_file(
         args.features, args.model, args.manifest, args.output,
         study_manifest=args.study_manifest, study_lock=args.study_lock,
-        cohort=args.cohort,
+        cohort=args.cohort, gate_features=args.gate_features,
     )
     print(f"rows={len(scores)} events={scores['event_id'].nunique()}")
     print(f"score_column={json.loads(args.manifest.read_text())['score_column']}")

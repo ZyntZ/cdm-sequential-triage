@@ -22,6 +22,7 @@ from repeated_calibration_stability import (
 )
 from freeze_next_validation import freeze_plan
 from train_final_tail_aligned import read_locked_candidate
+from score_final_tail_aligned import score_file as score_tail_file
 from validation_plan import (
     evaluation_planning_table, maximum_passing_failures,
     minimum_positive_events, pass_probability,
@@ -1144,3 +1145,58 @@ def test_frozen_study_detects_file_and_label_roster_drift(tmp_path):
     pd.DataFrame({"event_id": [1, 2], "time_to_tca": [6.0, 5.0]}).to_parquet(calibration_path)
     with np.testing.assert_raises(ValueError):
         validate_feature_cohort(calibration_path, manifest_path, lock_path, "calibration")
+
+
+def test_dynamic_scoring_passes_gate_features_and_custom_score_name():
+    training = snapshot_training_frame()
+    prepared = prepare_dynamic_frame(training)
+    model = fit_dynamic_model(prepared, event_equal_weights(prepared), {"iterations": 10})
+    features = snapshot_training_frame(100).drop(columns="y")
+    scores = score_dynamic_frame(
+        model,
+        features,
+        score_column="frozen_score",
+        passthrough_columns=["risk", "miss_distance", "risk_range"],
+    )
+    assert scores.columns.tolist() == [
+        "event_id", "time_to_tca", "eligible_history_count",
+        "risk", "miss_distance", "risk_range", "frozen_score",
+    ]
+    assert scores["frozen_score"].between(0.0, 1.0).all()
+    assert scores[["risk", "miss_distance", "risk_range"]].notna().all().all()
+
+
+def test_dynamic_scoring_rejects_invalid_passthrough_columns():
+    training = snapshot_training_frame()
+    prepared = prepare_dynamic_frame(training)
+    model = fit_dynamic_model(prepared, event_equal_weights(prepared), {"iterations": 10})
+    features = snapshot_training_frame(100).drop(columns="y")
+    with np.testing.assert_raises(ValueError):
+        score_dynamic_frame(model, features, passthrough_columns=["risk", "risk"])
+    with np.testing.assert_raises(ValueError):
+        score_dynamic_frame(model, features, passthrough_columns=["not_a_feature"])
+    with np.testing.assert_raises(ValueError):
+        score_dynamic_frame(model, features, passthrough_columns=["event_id"])
+
+
+def test_tail_score_file_retains_gate_features(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    features_path = tmp_path / "features.parquet"
+    output_path = tmp_path / "scores.parquet"
+    snapshot_training_frame(500).drop(columns="y").to_parquet(features_path, index=False)
+
+    scores = score_tail_file(
+        features_path=features_path,
+        model_path=root / "artifacts" / "catboost_tail_aligned_final_v13.cbm",
+        manifest_path=root / "artifacts" / "catboost_tail_aligned_final_v13.json",
+        output_path=output_path,
+        gate_features=["risk", "max_risk_estimate", "miss_distance", "mahalanobis_distance"],
+    )
+
+    assert output_path.exists()
+    assert scores.columns.tolist() == [
+        "event_id", "time_to_tca", "eligible_history_count",
+        "risk", "max_risk_estimate", "miss_distance", "mahalanobis_distance",
+        "catboost_tail_aligned", "model_sha256",
+    ]
+    pd.testing.assert_frame_equal(scores, pd.read_parquet(output_path))

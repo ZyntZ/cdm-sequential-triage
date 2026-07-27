@@ -124,12 +124,25 @@ def score_dynamic_frame(
     model: CatBoostClassifier,
     frame: pd.DataFrame,
     score_column: str = "catboost_tail_aligned",
+    passthrough_columns: tuple[str, ...] | list[str] = (),
 ) -> pd.DataFrame:
-    """Score raw, label-blind CDM histories with causal dynamic features."""
+    """Score raw, label-blind CDM histories and retain selected model features."""
     if "y" in frame.columns:
         raise ValueError("Scoring input must be label-blind; provide labels separately")
+    if not isinstance(score_column, str) or not score_column:
+        raise ValueError("score_column must be a non-empty string")
+    passthrough = tuple(passthrough_columns)
+    if len(set(passthrough)) != len(passthrough):
+        raise ValueError("passthrough_columns must be unique")
+    reserved = {"event_id", "time_to_tca", "eligible_history_count", score_column}
+    overlap = reserved.intersection(passthrough)
+    if overlap:
+        raise ValueError(f"Reserved passthrough columns: {sorted(overlap)}")
+    unknown = set(passthrough).difference(DYNAMIC_FEATURES)
+    if unknown:
+        raise ValueError(f"Unknown passthrough columns: {sorted(unknown)}")
+
     prepared = prepare_dynamic_frame(frame, require_labels=False)
     scores = score_dynamic_model(model, prepared)
-    return prepared.loc[:, [
-        "event_id", "time_to_tca", "eligible_history_count"
-    ]].assign(**{score_column: scores})
+    columns = ["event_id", "time_to_tca", "eligible_history_count", *passthrough]
+    return prepared.loc[:, columns].assign(**{score_column: scores})
