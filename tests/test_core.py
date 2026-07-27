@@ -23,6 +23,8 @@ from repeated_calibration_stability import (
 from freeze_next_validation import freeze_plan
 from train_final_tail_aligned import read_locked_candidate
 from score_final_tail_aligned import score_file as score_tail_file
+from replay_scores import load_runtime, run_replay, validate_score_stream
+from confirm_policy import calibration_command
 from validation_plan import (
     evaluation_planning_table, maximum_passing_failures,
     minimum_positive_events, pass_probability,
@@ -1265,3 +1267,165 @@ def test_tail_score_file_retains_gate_features(tmp_path):
     assert output_path.exists()
     assert {"risk", "max_risk_estimate", "miss_distance", "mahalanobis_distance"}.issubset(scores.columns)
     pd.testing.assert_frame_equal(scores, pd.read_parquet(output_path))
+
+
+def runtime_calibration_artifact(model_hash="runtime-model", threshold=0.20):
+    return {
+        "policy": {
+            "score_column": "catboost_tail_aligned",
+            "alpha": 0.10,
+            "confidence": 0.95,
+            "calibration_mode": "pac",
+            "minimum_history": 3,
+            "min_days_to_tca": 2.0,
+            "max_days_to_tca": 7.0,
+        },
+        "calibration": {"threshold": threshold},
+        "model_sha256": model_hash,
+        "shift_gate_sha256": None,
+        "model_manifest_sha256": None,
+        "calibration_event_ids": ["calibration-event"],
+    }
+
+
+def test_replay_scores_writes_complete_operator_audit(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(runtime_calibration_artifact()) + "\n")
+    scores_path = tmp_path / "scores.parquet"
+    pd.DataFrame({
+        "event_id": ["event", "event", "event", "other", "other", "other"],
+        "time_to_tca": [5.0, 7.0, 6.0, 7.0, 6.0, 5.0],
+        "catboost_tail_aligned": [0.10, 0.10, 0.10, 0.90, 0.90, 0.90],
+        "model_sha256": ["runtime-model"] * 6,
+    }).to_parquet(scores_path, index=False)
+    output = tmp_path / "audit.parquet"
+    checkpoint = tmp_path / "runtime.json"
+
+    audit = run_replay(scores_path, calibration, output, checkpoint_path=checkpoint)
+
+    assert output.exists() and checkpoint.exists()
+    assert len(audit) == 6
+    event = audit.loc[audit["event_id"] == "event"]
+    assert event["time_to_tca"].tolist() == [7.0, 6.0, 5.0]
+    assert event["decision"].tolist() == ["MONITOR", "MONITOR", "SAFE-EXCLUDE"]
+    pd.testing.assert_frame_equal(audit, pd.read_parquet(output))
+    assert audit["scores_sha256"].nunique() == 1
+    assert audit["calibration_sha256"].nunique() == 1
+    assert audit["runtime_checkpoint_sha256"].str.len().eq(64).all()
+    restored = SequentialTriagePolicy.restore(checkpoint)
+    assert len(restored.audit_log()) == 6
+
+
+def test_replay_scores_resumes_from_checkpoint(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(runtime_calibration_artifact()) + "\n")
+    checkpoint = tmp_path / "runtime.json"
+    first_scores = tmp_path / "first.parquet"
+    pd.DataFrame({
+        "event_id": [1, 1],
+        "time_to_tca": [7.0, 6.0],
+        "catboost_tail_aligned": [0.10, 0.10],
+        "model_sha256": ["runtime-model", "runtime-model"],
+    }).to_parquet(first_scores, index=False)
+    run_replay(first_scores, calibration, tmp_path / "first-audit.parquet", checkpoint_path=checkpoint)
+
+    next_scores = tmp_path / "next.parquet"
+    pd.DataFrame({
+        "event_id": [1],
+        "time_to_tca": [5.0],
+        "catboost_tail_aligned": [0.10],
+        "model_sha256": ["runtime-model"],
+    }).to_parquet(next_scores, index=False)
+    audit = run_replay(next_scores, calibration, tmp_path / "next-audit.parquet", checkpoint_path=checkpoint)
+
+    assert audit["sequence_number"].tolist() == [1, 2, 3]
+    assert audit.iloc[-1]["decision"] == "SAFE-EXCLUDE"
+
+
+def test_replay_scores_rejects_model_overlap_and_duplicate_updates(tmp_path):
+    artifact = runtime_calibration_artifact()
+    valid = pd.DataFrame({
+        "event_id": ["new"], "time_to_tca": [5.0],
+        "catboost_tail_aligned": [0.10], "model_sha256": ["runtime-model"],
+    })
+    validate_score_stream(valid, artifact, "catboost_tail_aligned", None)
+    with np.testing.assert_raises(ValueError):
+        validate_score_stream(
+            valid.assign(model_sha256="other-model"), artifact,
+            "catboost_tail_aligned", None,
+        )
+    with np.testing.assert_raises(ValueError):
+        validate_score_stream(
+            valid.assign(event_id="calibration-event"), artifact,
+            "catboost_tail_aligned", None,
+        )
+    with np.testing.assert_raises(ValueError):
+        validate_score_stream(
+            pd.concat([valid, valid], ignore_index=True), artifact,
+            "catboost_tail_aligned", None,
+        )
+
+
+def test_replay_scores_does_not_overwrite_output_or_silently_replay(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(runtime_calibration_artifact()) + "\n")
+    scores_path = tmp_path / "scores.parquet"
+    pd.DataFrame({
+        "event_id": [1], "time_to_tca": [5.0],
+        "catboost_tail_aligned": [0.10], "model_sha256": ["runtime-model"],
+    }).to_parquet(scores_path, index=False)
+    checkpoint = tmp_path / "runtime.json"
+    output = tmp_path / "audit.parquet"
+    run_replay(scores_path, calibration, output, checkpoint_path=checkpoint)
+    with np.testing.assert_raises(FileExistsError):
+        run_replay(scores_path, calibration, output, checkpoint_path=checkpoint)
+    with np.testing.assert_raises(ValueError):
+        run_replay(
+            scores_path, calibration, tmp_path / "second-audit.parquet",
+            checkpoint_path=checkpoint,
+        )
+
+
+def test_replay_scores_requires_matching_gate_and_gate_columns(tmp_path):
+    proper = pd.DataFrame({"risk": [-9.0, -8.5, -8.0, -7.5, -7.0]})
+    gate_calibration = pd.DataFrame({
+        "event_id": np.arange(39), "risk": np.linspace(-9.0, -7.0, 39)
+    })
+    gate = ConformalShiftGate(["risk"]).fit(proper)
+    gate.calibrate_events(gate_calibration, alpha=0.10)
+    gate_path = tmp_path / "gate.json"
+    gate.save(gate_path)
+    artifact = runtime_calibration_artifact()
+    artifact["shift_gate_sha256"] = gate.fingerprint()
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(artifact) + "\n")
+
+    runtime, policy = load_runtime(calibration, gate_path=gate_path)
+    missing_gate_column = pd.DataFrame({
+        "event_id": [1], "time_to_tca": [5.0],
+        "catboost_tail_aligned": [0.10], "model_sha256": ["runtime-model"],
+    })
+    with np.testing.assert_raises(ValueError):
+        validate_score_stream(
+            missing_gate_column, artifact, policy["score_column"], runtime.shift_gate
+        )
+    with np.testing.assert_raises(ValueError):
+        load_runtime(calibration)
+
+
+def test_calibration_command_refuses_existing_output(tmp_path):
+    import argparse
+    output = tmp_path / "calibration.json"
+    output.write_text("sentinel\n", encoding="utf-8")
+    args = argparse.Namespace(
+        scores=tmp_path / "missing-scores.parquet",
+        labels=tmp_path / "missing-labels.parquet",
+        output=output,
+        gate=None,
+        model_manifest=None,
+        study_manifest=None,
+        study_lock=None,
+    )
+    with np.testing.assert_raises(FileExistsError):
+        calibration_command(args)
+    assert output.read_text(encoding="utf-8") == "sentinel\n"

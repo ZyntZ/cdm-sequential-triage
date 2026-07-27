@@ -50,6 +50,8 @@ def _validate_scored_study(prefixes: pd.DataFrame, digest: str | None, cohort: s
 
 
 def calibration_command(args: argparse.Namespace) -> None:
+    if args.output.exists():
+        raise FileExistsError(f"Calibration output already exists: {args.output}")
     prefixes = pd.read_parquet(args.scores)
     labels = pd.read_parquet(args.labels)
     _, study_hash = _study_context(args, "calibration", labels)
