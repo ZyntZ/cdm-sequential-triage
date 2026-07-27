@@ -23,11 +23,14 @@ DECISION_CLASS = {"ESCALATE": "escalate", "MONITOR": "monitor", "SAFE-EXCLUDE": 
 REQUIRED = {
     "event_id", "sequence_number", "time_to_tca", "score", "decision", "reason",
     "shift_score", "shift_gate_allowed", "eligible_history_count", "scores_sha256",
-    "calibration_sha256", "model_sha256", "is_current_decision",
+    "calibration_sha256", "model_sha256", "runtime_configuration_sha256",
+    "safe_threshold", "escalation_threshold", "minimum_history",
+    "min_days_to_tca", "max_days_to_tca", "is_current_decision",
 }
 HASH_COLUMNS = (
     "scores_sha256", "calibration_sha256", "model_sha256", "shift_gate_sha256",
     "model_manifest_sha256", "runtime_checkpoint_sha256",
+    "runtime_configuration_sha256",
 )
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -79,6 +82,19 @@ def load_audits(paths: list[Path], calibration: dict, calibration_path: Path) ->
         frame["audit_file_sha256"] = file_sha256(path)
         frames.append(frame)
     combined = pd.concat(frames, ignore_index=True)
+    runtime_hashes = combined["runtime_configuration_sha256"].astype(str).unique()
+    if len(runtime_hashes) != 1:
+        raise ValueError("Audit files use different runtime configurations")
+    expected_runtime = {
+        "safe_threshold": float(calibration["calibration"]["threshold"]),
+        "minimum_history": int(calibration["policy"]["minimum_history"]),
+        "min_days_to_tca": float(calibration["policy"]["min_days_to_tca"]),
+        "max_days_to_tca": float(calibration["policy"]["max_days_to_tca"]),
+    }
+    for column, expected in expected_runtime.items():
+        values = pd.to_numeric(combined[column], errors="coerce")
+        if values.isna().any() or not np.allclose(values.to_numpy(), expected, rtol=0.0, atol=0.0):
+            raise ValueError(f"Audit runtime {column} does not match the calibration artifact")
     combined["__event_key"] = combined["event_id"].map(_event_key)
     if combined.duplicated(["__event_key", "sequence_number"]).any():
         raise ValueError("Audit files overlap in event sequence numbers")
@@ -175,6 +191,8 @@ def build_dashboard(audit_paths: list[Path], calibration_path: Path, output_path
     policy_rows += f"<tr><th>threshold</th><td>{_escape(rule.get('threshold'))}</td></tr><tr><th>calibration rank</th><td>{_escape(rule.get('rank'))} / {_escape(rule.get('n_positive'))}</td></tr><tr><th>PAC bound</th><td>{_escape(rule.get('pac_bound'))}</td></tr>"
     lineage = "".join(f"<tr><td>{_escape(p.name)}</td><td>{file_sha256(p)}</td></tr>" for p in audit_paths)
     lineage += f"<tr><td>{_escape(calibration_path.name)}</td><td>{file_sha256(calibration_path)}</td></tr>"
+    runtime_configuration_sha256 = str(audit["runtime_configuration_sha256"].iloc[0])
+    lineage += f"<tr><td>runtime configuration</td><td>{_escape(runtime_configuration_sha256)}</td></tr>"
     cards = "".join(f"<div class='kpi {DECISION_CLASS[d]}'><span>{d}</span><strong>{int(counts.get(d,0))}</strong><small>{100*counts.get(d,0)/events:.1f}% of current events</small></div>" for d in DECISIONS)
 
     document = f"""<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>CDM Triage Operator Console</title>

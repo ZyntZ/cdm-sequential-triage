@@ -66,6 +66,9 @@ def run_demo(output_dir: Path, root: Path = ROOT) -> dict:
             "evidence": evidence,
             "message_updates": int(len(audit)),
             "events_in_runtime_window": int(audit["event_id"].nunique()),
+            "runtime_configuration_sha256": str(
+                audit["runtime_configuration_sha256"].iloc[0]
+            ),
             "message_decisions": {
                 key: int(value) for key, value in audit["decision"].value_counts().items()
             },

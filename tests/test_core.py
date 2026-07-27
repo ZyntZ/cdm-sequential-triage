@@ -1576,6 +1576,12 @@ def dashboard_audit_frame(calibration_path, event_id="event", decision="MONITOR"
         "shift_gate_sha256": [None],
         "model_manifest_sha256": [None],
         "runtime_checkpoint_sha256": [None],
+        "runtime_configuration_sha256": ["d" * 64],
+        "safe_threshold": [0.20],
+        "escalation_threshold": [np.nan],
+        "minimum_history": [3],
+        "min_days_to_tca": [2.0],
+        "max_days_to_tca": [7.0],
         "is_current_decision": [True],
     })
 
@@ -1595,6 +1601,8 @@ def test_operator_dashboard_builds_self_contained_html(tmp_path):
     assert "Operator Console" in document
     assert "SAFE-EXCLUDE" in document
     assert "c" * 64 in document
+    assert "d" * 64 in document
+    assert "runtime configuration" in document
     assert "https://" not in document
 
 
@@ -1647,6 +1655,30 @@ def test_operator_dashboard_rejects_wrong_lineage_and_overlapping_batches(tmp_pa
         load_audits([first_path, duplicate_path], runtime_calibration_artifact(model_hash="c" * 64), calibration)
 
 
+def test_operator_dashboard_rejects_runtime_configuration_drift(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    artifact = runtime_calibration_artifact(model_hash="c" * 64)
+    calibration.write_text(json.dumps(artifact) + "\n")
+    valid = dashboard_audit_frame(calibration)
+
+    wrong_threshold = valid.copy()
+    wrong_threshold["safe_threshold"] = 0.21
+    wrong_threshold_path = tmp_path / "wrong-threshold.parquet"
+    wrong_threshold.to_parquet(wrong_threshold_path, index=False)
+    with np.testing.assert_raises(ValueError):
+        load_audits([wrong_threshold_path], artifact, calibration)
+
+    second_runtime = valid.copy()
+    second_runtime["event_id"] = "other"
+    second_runtime["runtime_configuration_sha256"] = "e" * 64
+    first_path = tmp_path / "first.parquet"
+    second_path = tmp_path / "second.parquet"
+    valid.to_parquet(first_path, index=False)
+    second_runtime.to_parquet(second_path, index=False)
+    with np.testing.assert_raises(ValueError):
+        load_audits([first_path, second_path], artifact, calibration)
+
+
 def test_operator_dashboard_shows_failed_confirmation_honestly(tmp_path):
     calibration = tmp_path / "calibration.json"
     calibration.write_text(json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n")
@@ -1691,6 +1723,7 @@ def test_one_command_demo_builds_verified_outputs(tmp_path):
     assert summary["message_updates"] == 22656
     assert summary["events_in_runtime_window"] == 2387
     assert summary["confirmation"]["passed"] is False
+    assert len(summary["runtime_configuration_sha256"]) == 64
     assert (output / "replay-audit.parquet").exists()
     assert (output / "operator-console.html").exists()
     assert (output / "runtime-state.json").exists()
@@ -1700,7 +1733,10 @@ def test_one_command_demo_builds_verified_outputs(tmp_path):
     assert stored["caveat"] == summary["caveat"]
     assert stored["evidence_dashboard"] == "evidence-dashboard.html"
     assert stored["evidence"]["confirmation_passed"] is False
-    assert "NOT MET" in (output / "operator-console.html").read_text(encoding="utf-8")
+    assert stored["runtime_configuration_sha256"] == summary["runtime_configuration_sha256"]
+    console = (output / "operator-console.html").read_text(encoding="utf-8")
+    assert "NOT MET" in console
+    assert summary["runtime_configuration_sha256"] in console
 
 
 def test_one_command_demo_refuses_protected_and_nonempty_output(tmp_path):
