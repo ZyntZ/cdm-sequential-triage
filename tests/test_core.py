@@ -25,6 +25,7 @@ from train_final_tail_aligned import read_locked_candidate
 from score_final_tail_aligned import score_file as score_tail_file
 from replay_scores import load_runtime, replay_scores, run_replay, validate_score_stream
 from operator_dashboard import build_dashboard, current_events, load_audits
+from evidence_dashboard import build_evidence_dashboard
 from run_demo import run_demo
 from confirm_policy import calibration_command
 from validation_plan import (
@@ -1651,8 +1652,11 @@ def test_one_command_demo_builds_verified_outputs(tmp_path):
     assert (output / "operator-console.html").exists()
     assert (output / "runtime-state.json").exists()
     assert (output / "summary.json").exists()
+    assert (output / "evidence-dashboard.html").exists()
     stored = json.loads((output / "summary.json").read_text(encoding="utf-8"))
     assert stored["caveat"] == summary["caveat"]
+    assert stored["evidence_dashboard"] == "evidence-dashboard.html"
+    assert stored["evidence"]["confirmation_passed"] is False
     assert "NOT MET" in (output / "operator-console.html").read_text(encoding="utf-8")
 
 
@@ -1682,3 +1686,47 @@ def test_one_command_demo_cleans_staging_on_failure(tmp_path, monkeypatch):
         demo_module.run_demo(output, root=root)
     assert not output.exists()
     assert not list(tmp_path.glob(".failed-demo.*"))
+
+
+def test_evidence_dashboard_builds_three_verified_tiers(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    output = tmp_path / "evidence.html"
+    summary = build_evidence_dashboard(root, output)
+    document = output.read_text(encoding="utf-8")
+
+    assert summary["confirmation_passed"] is False
+    assert abs(summary["danger_ucb"] - 0.12101499810942579) < 1e-12
+    assert summary["criterion"] == 0.10
+    assert summary["development_pareto_methods"] == ["catboost_tail_aligned", "minimum"]
+    assert summary["preregistration_frozen"] is True
+    assert summary["calibration_accessed"] is False
+    assert summary["evaluation_accessed"] is False
+    assert summary["v13_threshold"] is None
+    assert "id='development'" in document
+    assert "id='confirmation'" in document
+    assert "id='preregistered'" in document
+    assert "CRITERION NOT MET" in document
+    assert "12.10%" in document
+    assert "not confirmation evidence" in document
+    assert "https://" not in document
+
+
+def test_evidence_dashboard_refuses_overwrite(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    output = tmp_path / "evidence.html"
+    output.write_text("sentinel", encoding="utf-8")
+    with np.testing.assert_raises(FileExistsError):
+        build_evidence_dashboard(root, output)
+    assert output.read_text(encoding="utf-8") == "sentinel"
+
+
+def test_evidence_dashboard_verifies_preregistration_lock(tmp_path):
+    import shutil
+    root = Path(__file__).resolve().parents[1]
+    copy_root = tmp_path / "copy"
+    shutil.copytree(root / "artifacts", copy_root / "artifacts")
+    shutil.copytree(root / "reports", copy_root / "reports")
+    prereg = copy_root / "artifacts" / "next_validation_preregistration_v12.json"
+    prereg.write_text(prereg.read_text(encoding="utf-8") + " ", encoding="utf-8")
+    with np.testing.assert_raises(ValueError):
+        build_evidence_dashboard(copy_root, tmp_path / "evidence.html")

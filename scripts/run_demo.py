@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from operator_dashboard import build_dashboard
+from evidence_dashboard import build_evidence_dashboard
 from replay_scores import run_replay
 
 
@@ -35,7 +36,8 @@ def run_demo(output_dir: Path, root: Path = ROOT) -> dict:
     scores = root / "artifacts" / "confirmation_v1" / "evaluation_scores.parquet"
     calibration = root / "artifacts" / "confirmation_v1" / "calibration.json"
     confirmation = root / "artifacts" / "confirmation_v1" / "confirmation.json"
-    for path in (scores, calibration, confirmation):
+    preregistration = root / "artifacts" / "next_validation_preregistration_v12.json"
+    for path in (scores, calibration, confirmation, preregistration):
         if not path.exists():
             raise FileNotFoundError(f"Required historical artifact is missing: {path}")
 
@@ -45,6 +47,7 @@ def run_demo(output_dir: Path, root: Path = ROOT) -> dict:
         audit_path = staging / "replay-audit.parquet"
         console_path = staging / "operator-console.html"
         checkpoint_path = staging / "runtime-state.json"
+        evidence_path = staging / "evidence-dashboard.html"
         audit = run_replay(
             scores, calibration, audit_path, checkpoint_path=checkpoint_path
         )
@@ -52,12 +55,15 @@ def run_demo(output_dir: Path, root: Path = ROOT) -> dict:
             [audit_path], calibration, console_path,
             confirmation_path=confirmation,
         )
+        evidence = build_evidence_dashboard(root, evidence_path)
         summary = {
             "status": "historical-demo-not-for-operations",
             "output_directory": str(output_dir),
             "audit": "replay-audit.parquet",
             "console": "operator-console.html",
             "checkpoint": "runtime-state.json",
+            "evidence_dashboard": "evidence-dashboard.html",
+            "evidence": evidence,
             "message_updates": int(len(audit)),
             "events_in_runtime_window": int(audit["event_id"].nunique()),
             "message_decisions": {
