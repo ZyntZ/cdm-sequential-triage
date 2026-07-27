@@ -120,14 +120,15 @@ def replay_scores(
     runtime: SequentialTriagePolicy,
     score_column: str,
 ) -> pd.DataFrame:
-    ordered = validate_score_stream(
-        scores,
-        {"model_sha256": scores["model_sha256"].iloc[0], "calibration_event_ids": []},
-        score_column,
-        runtime.shift_gate,
-    )
+    """Apply a pre-validated, pre-ordered score frame to the runtime policy."""
+    required = {"event_id", "time_to_tca", score_column}
+    if runtime.shift_gate is not None:
+        required.update(runtime.shift_gate.feature_columns)
+    missing = required.difference(scores.columns)
+    if missing:
+        raise ValueError(f"Missing replay columns: {sorted(missing)}")
     gate_columns = [] if runtime.shift_gate is None else runtime.shift_gate.feature_columns
-    for row in ordered.to_dict(orient="records"):
+    for row in scores.to_dict(orient="records"):
         gate_features = (
             None if not gate_columns else {column: row[column] for column in gate_columns}
         )
@@ -182,17 +183,44 @@ def run_replay(
     ordered = validate_score_stream(
         scores, artifact, policy_config["score_column"], runtime.shift_gate
     )
-    audit = replay_scores(ordered, runtime, policy_config["score_column"])
+    prior_audit_rows = len(runtime.audit_log())
+    complete_audit = replay_scores(ordered, runtime, policy_config["score_column"])
+    audit = complete_audit.iloc[prior_audit_rows:].reset_index(drop=True).copy()
+    if len(audit) != len(ordered):
+        raise RuntimeError("Replay audit row count does not match the accepted input stream")
     audit["scores_sha256"] = file_sha256(scores_path)
     audit["calibration_sha256"] = file_sha256(calibration_path)
     audit["model_sha256"] = str(artifact["model_sha256"])
     audit["shift_gate_sha256"] = artifact.get("shift_gate_sha256")
     audit["model_manifest_sha256"] = artifact.get("model_manifest_sha256")
+    audit["is_current_decision"] = ~audit["event_id"].duplicated(keep="last")
+
     checkpoint_digest = None
+    staged_checkpoint = None
     if checkpoint_path is not None:
-        checkpoint_digest = runtime.checkpoint(checkpoint_path)
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, staged_name = tempfile.mkstemp(
+            dir=checkpoint_path.parent,
+            prefix=f".{checkpoint_path.name}.",
+            suffix=".staged",
+        )
+        os.close(descriptor)
+        staged_checkpoint = Path(staged_name)
+        staged_checkpoint.unlink()
+        checkpoint_digest = runtime.checkpoint(staged_checkpoint)
     audit["runtime_checkpoint_sha256"] = checkpoint_digest
-    _write_parquet_atomic(audit, output_path)
+
+    try:
+        _write_parquet_atomic(audit, output_path)
+        if checkpoint_path is not None:
+            os.replace(staged_checkpoint, checkpoint_path)
+            staged_checkpoint = None
+    except Exception:
+        output_path.unlink(missing_ok=True)
+        raise
+    finally:
+        if staged_checkpoint is not None:
+            staged_checkpoint.unlink(missing_ok=True)
     return audit
 
 

@@ -23,7 +23,7 @@ from repeated_calibration_stability import (
 from freeze_next_validation import freeze_plan
 from train_final_tail_aligned import read_locked_candidate
 from score_final_tail_aligned import score_file as score_tail_file
-from replay_scores import load_runtime, run_replay, validate_score_stream
+from replay_scores import load_runtime, replay_scores, run_replay, validate_score_stream
 from confirm_policy import calibration_command
 from validation_plan import (
     evaluation_planning_table, maximum_passing_failures,
@@ -1338,8 +1338,10 @@ def test_replay_scores_resumes_from_checkpoint(tmp_path):
     }).to_parquet(next_scores, index=False)
     audit = run_replay(next_scores, calibration, tmp_path / "next-audit.parquet", checkpoint_path=checkpoint)
 
-    assert audit["sequence_number"].tolist() == [1, 2, 3]
+    assert audit["sequence_number"].tolist() == [3]
     assert audit.iloc[-1]["decision"] == "SAFE-EXCLUDE"
+    restored = SequentialTriagePolicy.restore(checkpoint)
+    assert restored.audit_log()["sequence_number"].tolist() == [1, 2, 3]
 
 
 def test_replay_scores_rejects_model_overlap_and_duplicate_updates(tmp_path):
@@ -1429,3 +1431,81 @@ def test_calibration_command_refuses_existing_output(tmp_path):
     with np.testing.assert_raises(FileExistsError):
         calibration_command(args)
     assert output.read_text(encoding="utf-8") == "sentinel\n"
+
+
+def test_replay_scores_public_loop_requires_prevalidated_columns():
+    runtime = SequentialTriagePolicy(safe_threshold=0.20)
+    frame = pd.DataFrame({"event_id": ["event"], "time_to_tca": [5.0]})
+    with np.testing.assert_raises(ValueError):
+        replay_scores(frame, runtime, "catboost_tail_aligned")
+    assert runtime.audit_log().empty
+
+
+def test_replay_resume_output_keeps_current_batch_lineage(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(runtime_calibration_artifact()) + "\n")
+    checkpoint = tmp_path / "runtime.json"
+    first_scores = tmp_path / "first.parquet"
+    second_scores = tmp_path / "second.parquet"
+    pd.DataFrame({
+        "event_id": [1], "time_to_tca": [7.0],
+        "catboost_tail_aligned": [0.10], "model_sha256": ["runtime-model"],
+    }).to_parquet(first_scores, index=False)
+    first = run_replay(
+        first_scores, calibration, tmp_path / "first-audit.parquet",
+        checkpoint_path=checkpoint,
+    )
+    pd.DataFrame({
+        "event_id": [1], "time_to_tca": [6.0],
+        "catboost_tail_aligned": [0.10], "model_sha256": ["runtime-model"],
+    }).to_parquet(second_scores, index=False)
+    second = run_replay(
+        second_scores, calibration, tmp_path / "second-audit.parquet",
+        checkpoint_path=checkpoint,
+    )
+    from confirmation import file_sha256
+    assert len(first) == len(second) == 1
+    assert first.iloc[0]["scores_sha256"] == file_sha256(first_scores)
+    assert second.iloc[0]["scores_sha256"] == file_sha256(second_scores)
+    assert second.iloc[0]["sequence_number"] == 2
+
+
+def test_replay_audit_failure_does_not_advance_checkpoint(tmp_path, monkeypatch):
+    import replay_scores as replay_module
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(runtime_calibration_artifact()) + "\n")
+    scores = tmp_path / "scores.parquet"
+    pd.DataFrame({
+        "event_id": [1], "time_to_tca": [7.0],
+        "catboost_tail_aligned": [0.10], "model_sha256": ["runtime-model"],
+    }).to_parquet(scores, index=False)
+    checkpoint = tmp_path / "runtime.json"
+    before = SequentialTriagePolicy(safe_threshold=0.20, minimum_history=3)
+    before.checkpoint(checkpoint)
+    original = checkpoint.read_bytes()
+
+    def fail_write(*args, **kwargs):
+        raise OSError("simulated audit write failure")
+
+    monkeypatch.setattr(replay_module, "_write_parquet_atomic", fail_write)
+    with np.testing.assert_raises(OSError):
+        replay_module.run_replay(
+            scores, calibration, tmp_path / "audit.parquet",
+            checkpoint_path=checkpoint,
+        )
+    assert checkpoint.read_bytes() == original
+    assert not (tmp_path / "audit.parquet").exists()
+
+
+def test_replay_marks_current_decision_within_each_output_batch(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(runtime_calibration_artifact()) + "\n")
+    scores = tmp_path / "scores.parquet"
+    pd.DataFrame({
+        "event_id": ["a", "a", "b"],
+        "time_to_tca": [7.0, 6.0, 5.0],
+        "catboost_tail_aligned": [0.10, 0.10, 0.90],
+        "model_sha256": ["runtime-model"] * 3,
+    }).to_parquet(scores, index=False)
+    audit = run_replay(scores, calibration, tmp_path / "audit.parquet")
+    assert audit["is_current_decision"].tolist() == [False, True, True]
