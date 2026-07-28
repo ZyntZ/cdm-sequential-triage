@@ -109,6 +109,56 @@ def _atomic_write(path: Path, text: str) -> None:
             Path(temporary).unlink(missing_ok=True)
 
 
+
+SUPPORTED_LOCALES = {"en", "ru"}
+
+
+def localize_operator_document(document: str, locale: str) -> str:
+    if locale not in SUPPORTED_LOCALES:
+        raise ValueError(f"Unsupported locale: {locale}")
+    if locale == "en":
+        return document
+    replacements = [
+        ("<html lang='en'>", "<html lang='ru'>"),
+        ("CDM Triage Operator Console", "Операторская консоль триажа CDM"),
+        ("SPACE TRAFFIC · DECISION SUPPORT", "КОСМИЧЕСКОЕ ДВИЖЕНИЕ · ПОДДЕРЖКА РЕШЕНИЙ"),
+        ("Sequential CDM Triage · Operator Console", "Последовательный триаж CDM · Операторская консоль"),
+        ("Calibrated event-level exclusion policy with auditable message-by-message decisions", "Калиброванная event-level политика с аудитом решения после каждого сообщения"),
+        ("HISTORICAL DEMO · NOT FOR OPERATIONS", "ИСТОРИЧЕСКАЯ ДЕМОНСТРАЦИЯ · НЕ ДЛЯ ЭКСПЛУАТАЦИИ"),
+        ("CURRENT RUNTIME STATE", "ТЕКУЩЕЕ СОСТОЯНИЕ"),
+        ("Active events", "Активные события"), ("Processed updates", "Обработанные сообщения"),
+        ("of current events", "текущих событий"), ("across", "в"), ("batch(es)", "пакетах"),
+        ("message-level count", "число сообщений"), ("Batch chain", "Цепочка пакетов"),
+        ("length", "длина"), ("showing", "показано"), ("events", "событий"),
+        ("gate: active", "gate: активен"), ("events blocked", "событий заблокировано"),
+        ("gate: not active", "gate: не активен"),
+        ("ACTIVE EVENT QUEUE", "АКТИВНАЯ ОЧЕРЕДЬ СОБЫТИЙ"),
+        ("Current decision", "Текущее решение"), ("Event", "Событие"),
+        ("Score", "Score"), ("History", "История"), ("Reason", "Причина"),
+        ("FROZEN POLICY", "ЗАМОРОЖЕННАЯ ПОЛИТИКА"),
+        ("SAFE-EXCLUDE removes an event from the current manual-review queue while automated ingestion continues. It is not a maneuver command.", "SAFE-EXCLUDE исключает событие из текущей очереди ручного анализа, но автоматический приём новых CDM продолжается. Это не команда на манёвр."),
+        ("EVENT DECISION TIMELINE", "ИСТОРИЯ РЕШЕНИЙ ПО СОБЫТИЮ"),
+        ("ARTIFACT LINEAGE", "ПРОИСХОЖДЕНИЕ АРТЕФАКТОВ"),
+        ("Artifact", "Артефакт"), ("shift gate", "shift gate"),
+        ("PROCESSED BATCH CHAIN", "ЦЕПОЧКА ОБРАБОТАННЫХ ПАКЕТОВ"),
+        ("CDM rows", "Строки CDM"), ("Min TCA, d", "Мин. TCA, сут."),
+        ("Max TCA, d", "Макс. TCA, сут."), ("Audit rows", "Строки аудита"),
+        ("Previous entry", "Предыдущая запись"),
+        ("LOCKED CONFIRMATION EVIDENCE", "ЗАМОРОЖЕННОЕ ПОДТВЕРЖДАЮЩЕЕ ДОКАЗАТЕЛЬСТВО"),
+        ("Dangerous exclusions", "Опасные исключения"),
+        ("Observed event rate", "Наблюдаемая доля"),
+        ("One-sided 95% UCB", "Односторонняя 95%-я UCB"),
+        ("criterion ≤", "критерий ≤"), ("NOT MET", "НЕ ВЫПОЛНЕН"), ("MET", "ВЫПОЛНЕН"),
+        ("Correct SAFE-EXCLUDE", "Корректные SAFE-EXCLUDE"),
+        ("Median lead time", "Медианное упреждение"),
+        ("Historical confirmation_v1 evidence. The primary criterion was not met. This does not validate the preregistered v13 candidate.", "Историческое доказательство confirmation_v1. Основной критерий не выполнен. Результат не подтверждает предзарегистрированный кандидат v13."),
+        ("Dataset:", "Набор данных:"),
+        ("Target is high final calculated collision probability, not collision occurrence. Statistical control requires event-level exchangeability and is not an operational guarantee under arbitrary distribution shift.", "Целью является высокая финальная расчётная вероятность столкновения, а не факт столкновения. Статистический контроль требует event-level обменности и не является эксплуатационной гарантией при произвольном сдвиге распределения."),
+    ]
+    for source, target in replacements:
+        document = document.replace(source, target)
+    return document
+
 def build_dashboard(
     audit_paths: list[Path],
     calibration_path: Path,
@@ -117,6 +167,7 @@ def build_dashboard(
     max_events: int = 250,
     checkpoint_path: Path | None = None,
     max_chain_rows: int = 50,
+    locale: str = "en",
 ) -> dict[str, Any]:
     if output_path.exists():
         raise FileExistsError(f"Dashboard output already exists: {output_path}")
@@ -275,8 +326,9 @@ def build_dashboard(
 <section class='panel lineage'><div class='panel-title'>ARTIFACT LINEAGE</div><table><thead><tr><th>Artifact</th><th>SHA-256</th></tr></thead><tbody>{lineage}</tbody></table><div class='source'>model {_escape(calibration.get('model_sha256'))}<br>shift gate {_escape(calibration.get('shift_gate_sha256'))}</div></section>{chain_table_html}{confirmation_html}</div>
 <footer>Dataset: ESA Collision Avoidance Challenge, Zenodo 10.5281/zenodo.4463683, CC BY 4.0. Target is high final calculated collision probability, not collision occurrence. Statistical control requires event-level exchangeability and is not an operational guarantee under arbitrary distribution shift.</footer>
 <script>const events={timeline_json};const select=document.getElementById('event-select'),timeline=document.getElementById('timeline');function esc(s){{return String(s).replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));}}for(const e of events){{const o=document.createElement('option');o.value=e.key;o.textContent=e.label;select.appendChild(o);}}function render(){{const e=events.find(x=>x.key===select.value)||events[0];timeline.innerHTML='';if(!e)return;for(const u of e.updates){{const d=document.createElement('div');d.className='step';d.innerHTML=`<strong>${{esc(u.decision)}}</strong><span>seq ${{u.sequence}} · TCA ${{u.tca.toFixed(3)}} d</span><span>score ${{u.score.toPrecision(5)}} · history ${{u.history}}</span><span>${{esc(u.reason)}} · gate ${{u.gate?'ALLOW':'BLOCK'}}</span>`;timeline.appendChild(d);}}}}select.addEventListener('change',render);render();</script></main></body></html>"""
+    document = localize_operator_document(document, locale)
     _atomic_write(output_path, document)
-    return {"updates": updates, "events": events, "current_decisions": {d: int(counts.get(d,0)) for d in DECISIONS}, "gate_active": bool(gate_active), "shown_events": len(shown), "chain": chain_summary, "confirmation": confirmation_summary}
+    return {"updates": updates, "events": events, "current_decisions": {d: int(counts.get(d,0)) for d in DECISIONS}, "gate_active": bool(gate_active), "shown_events": len(shown), "chain": chain_summary, "confirmation": confirmation_summary, "locale": locale}
 
 
 def main() -> None:
@@ -288,6 +340,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-events", type=int, default=250)
     parser.add_argument("--max-chain-rows", type=int, default=50)
+    parser.add_argument("--locale", choices=sorted(SUPPORTED_LOCALES), default="en")
     args = parser.parse_args()
     print(json.dumps(build_dashboard(
         args.audit, args.calibration, args.output,
@@ -295,6 +348,7 @@ def main() -> None:
         max_events=args.max_events,
         checkpoint_path=args.checkpoint,
         max_chain_rows=args.max_chain_rows,
+        locale=args.locale,
     ), ensure_ascii=False, indent=2))
 
 

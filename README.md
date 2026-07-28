@@ -57,7 +57,13 @@ Build the locked `confirmation_v1` replay audit and self-contained operator cons
 python scripts/run_demo.py --output-dir /tmp/cdm-sequential-triage-demo
 ```
 
-The command writes `replay-audit.parquet`, `runtime-state.json`, `operator-console.html`, `evidence-dashboard.html`, and `summary.json` into a fresh output directory outside source and artifact folders. The evidence dashboard keeps exploratory development results, the locked confirmation_v1 result, and the preregistered v13 study in separate, color-coded tiers and verifies their SHA-256 links before rendering. Its development tier includes a self-contained safety–automation frontier and an outer-fold stability panel: Pareto-efficient methods, the 10% UCB criterion, the selected candidate's paired coverage gain, and the negative fold results are visible without external plotting libraries or network assets. It refuses non-empty or protected destinations and removes staged output if either replay or dashboard generation fails. The demo is label-blind historical runtime evidence only: `confirmation_v1` did not meet its pre-specified 10% UCB criterion and does not validate the v13 candidate.
+For the Russian competition-facing interface:
+
+```bash
+python scripts/run_demo.py --output-dir /tmp/cdm-sequential-triage-demo-ru --locale ru
+```
+
+The command writes `replay-audit.parquet`, `runtime-state.json`, `operator-console.html`, `evidence-dashboard.html`, and `summary.json` into a fresh output directory outside source and artifact folders. The optional `--locale ru` switch renders both HTML dashboards in Russian while preserving decision codes, artifact hashes, numerical results, and the separation between development, confirmation, and preregistered evidence. The evidence dashboard keeps exploratory development results, the locked confirmation_v1 result, and the preregistered v13 study in separate, color-coded tiers and verifies their SHA-256 links before rendering. Its development tier includes a self-contained safety–automation frontier and an outer-fold stability panel: Pareto-efficient methods, the 10% UCB criterion, the selected candidate's paired coverage gain, and the negative fold results are visible without external plotting libraries or network assets. It refuses non-empty or protected destinations and removes staged output if either replay or dashboard generation fails. The demo is label-blind historical runtime evidence only: `confirmation_v1` did not meet its pre-specified 10% UCB criterion and does not validate the v13 candidate.
 
 ## Reproducibility
 - Dataset source/checksums: `data/manifest.json`

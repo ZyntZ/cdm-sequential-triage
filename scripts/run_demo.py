@@ -24,7 +24,7 @@ def _inside(child: Path, parent: Path) -> bool:
         return False
 
 
-def run_demo(output_dir: Path, root: Path = ROOT) -> dict:
+def run_demo(output_dir: Path, root: Path = ROOT, locale: str = "en") -> dict:
     """Create a historical replay audit and console in a fresh external directory."""
     output_dir = output_dir.resolve()
     protected = [root / "artifacts", root / "data", root / "src", root / "scripts"]
@@ -55,10 +55,12 @@ def run_demo(output_dir: Path, root: Path = ROOT) -> dict:
             [audit_path], calibration, console_path,
             confirmation_path=confirmation,
             checkpoint_path=checkpoint_path,
+            locale=locale,
         )
-        evidence = build_evidence_dashboard(root, evidence_path)
+        evidence = build_evidence_dashboard(root, evidence_path, locale=locale)
         summary = {
             "status": "historical-demo-not-for-operations",
+            "locale": locale,
             "output_directory": str(output_dir),
             "audit": "replay-audit.parquet",
             "console": "operator-console.html",
@@ -100,8 +102,11 @@ def main() -> None:
         "--output-dir", type=Path,
         default=Path(tempfile.gettempdir()) / "cdm-sequential-triage-demo",
     )
+    parser.add_argument("--locale", choices=("en", "ru"), default="en")
     args = parser.parse_args()
-    print(json.dumps(run_demo(args.output_dir), ensure_ascii=False, indent=2))
+    print(json.dumps(
+        run_demo(args.output_dir, locale=args.locale), ensure_ascii=False, indent=2
+    ))
 
 
 if __name__ == "__main__":

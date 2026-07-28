@@ -2467,6 +2467,40 @@ def test_fold_stability_svg_rejects_incomplete_input():
         fold_stability_svg(pd.DataFrame({"method": ["catboost_tail_aligned"]}))
 
 
+def test_russian_demo_localizes_operator_and_evidence_dashboards(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    output = tmp_path / "russian-demo"
+    summary = run_demo(output, root=root, locale="ru")
+    operator = (output / "operator-console.html").read_text(encoding="utf-8")
+    evidence = (output / "evidence-dashboard.html").read_text(encoding="utf-8")
+
+    assert summary["locale"] == "ru"
+    assert summary["evidence"]["locale"] == "ru"
+    assert "<html lang='ru'>" in operator
+    assert "Операторская консоль" in operator
+    assert "АКТИВНАЯ ОЧЕРЕДЬ СОБЫТИЙ" in operator
+    assert "НЕ ВЫПОЛНЕН" in operator
+    assert "<html lang='ru'>" in evidence
+    assert "Доказательная панель" in evidence
+    assert "Граница безопасность–автоматизация" in evidence
+    assert "КРИТЕРИЙ НЕ ВЫПОЛНЕН" in evidence
+    assert evidence.count("<svg class='evidence-plot'") == 2
+    assert "https://" not in operator
+    assert "https://" not in evidence
+
+
+def test_dashboards_reject_unsupported_locale(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    with np.testing.assert_raises(ValueError):
+        build_evidence_dashboard(root, tmp_path / "evidence.html", locale="xx")
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n")
+    audit = tmp_path / "audit.parquet"
+    dashboard_audit_frame(calibration).to_parquet(audit, index=False)
+    with np.testing.assert_raises(ValueError):
+        build_dashboard([audit], calibration, tmp_path / "operator.html", locale="xx")
+
+
 def test_evidence_dashboard_refuses_overwrite(tmp_path):
     root = Path(__file__).resolve().parents[1]
     output = tmp_path / "evidence.html"
