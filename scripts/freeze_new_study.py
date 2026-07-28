@@ -18,11 +18,17 @@ def main() -> None:
     parser.add_argument("--preregistration-lock", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--lock", type=Path, required=True)
+    parser.add_argument("--calibration-roster", type=Path)
+    parser.add_argument("--evaluation-roster", type=Path)
+    parser.add_argument("--allocation-manifest", type=Path)
     args = parser.parse_args()
     manifest = freeze_study(
         args.calibration_features, args.evaluation_features,
         args.preregistration, args.preregistration_lock,
         args.output, args.lock,
+        calibration_roster=args.calibration_roster,
+        evaluation_roster=args.evaluation_roster,
+        allocation_manifest=args.allocation_manifest,
     )
     calibration = manifest["cohorts"]["calibration"]
     evaluation = manifest["cohorts"]["evaluation"]

@@ -19,9 +19,9 @@ from external_cdm import (
     parse_cdm_json,
     readiness_report,
 )
-from study import file_sha256
+from study import file_sha256, read_locked_study
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _atomic_json(payload: dict[str, Any], path: Path) -> None:
@@ -75,7 +75,8 @@ def message_fingerprint(row: pd.Series | dict[str, Any]) -> str:
         key: _canonical_value(value)
         for key, value in sorted(record.items())
         if key not in {
-            "event_id", "event_cluster", "source_export_sha256", "collection_batch"
+            "event_id", "event_cluster", "study_cohort",
+            "source_export_sha256", "collection_batch"
         }
     }
     raw = json.dumps(material, sort_keys=True, separators=(",", ":"), default=str, allow_nan=False).encode()
@@ -116,6 +117,51 @@ def _verify_batch_chain(batches: list[dict[str, Any]]) -> str | None:
 
 
 
+def allocate_prospective_cohort(
+    event_id: str,
+    seed: int,
+    calibration_fraction: float,
+) -> str:
+    """Assign an event without labels using a frozen SHA-256 rule."""
+    if not 0 < calibration_fraction < 1:
+        raise ValueError("calibration_fraction must lie in (0, 1)")
+    digest = hashlib.sha256(f"{int(seed)}:{event_id}".encode("utf-8")).digest()
+    value = int.from_bytes(digest[:8], "big") / 2**64
+    return "calibration" if value < calibration_fraction else "evaluation"
+
+
+def _assignment_sha256(assignments: dict[str, str]) -> str:
+    raw = json.dumps(
+        assignments, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _verify_assignments(ledger: dict[str, Any]) -> None:
+    allocation = ledger.get("allocation")
+    if allocation is None:
+        if ledger.get("schema_version") == 1:
+            return
+        raise ValueError("Prospective collection has no cohort allocation")
+    if allocation.get("rule") != "sha256-event-id":
+        raise ValueError("Unsupported prospective allocation rule")
+    fraction = float(allocation.get("calibration_fraction"))
+    seed = int(allocation.get("seed"))
+    assignments = allocation.get("assignments")
+    if not isinstance(assignments, dict):
+        raise ValueError("Prospective cohort assignments are missing")
+    if any(value not in {"calibration", "evaluation"} for value in assignments.values()):
+        raise ValueError("Prospective cohort assignment contains an invalid cohort")
+    expected = {
+        event_id: allocate_prospective_cohort(event_id, seed, fraction)
+        for event_id in assignments
+    }
+    if assignments != expected:
+        raise ValueError("Prospective cohort assignment does not match its frozen rule")
+    if allocation.get("assignments_sha256") != _assignment_sha256(assignments):
+        raise ValueError("Prospective cohort assignment digest is invalid")
+
+
 def _load_batches(ledger: dict[str, Any], ledger_path: Path) -> pd.DataFrame:
     frames = []
     for batch in ledger.get("batches", []):
@@ -133,16 +179,26 @@ def _load_batches(ledger: dict[str, Any], ledger_path: Path) -> pd.DataFrame:
     combined = pd.concat(frames, ignore_index=True)
     if combined["source_message_id"].duplicated().any():
         raise ValueError("Collection ledger contains duplicate source_message_id values")
+    allocation = ledger.get("allocation")
+    if allocation is not None:
+        assignments = allocation["assignments"]
+        actual_events = set(combined["event_id"].astype(str))
+        if actual_events != set(assignments):
+            raise ValueError("Collected event roster does not match cohort assignments")
+        expected_cohort = combined["event_id"].astype(str).map(assignments)
+        if "study_cohort" not in combined or not combined["study_cohort"].eq(expected_cohort).all():
+            raise ValueError("Collected messages do not match frozen cohort assignments")
     return combined
 
 
 def read_collection(ledger_path: str | Path) -> tuple[dict[str, Any], pd.DataFrame]:
     ledger_path = Path(ledger_path)
     ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
-    if ledger.get("schema_version") != SCHEMA_VERSION:
+    if ledger.get("schema_version") not in {1, SCHEMA_VERSION}:
         raise ValueError("Unsupported external collection ledger schema")
-    if ledger.get("status") not in {"collecting", "closed"}:
+    if ledger.get("status") not in {"collecting", "sealed", "closed"}:
         raise ValueError("Invalid external collection status")
+    _verify_assignments(ledger)
     head = _verify_batch_chain(ledger.get("batches", []))
     if ledger.get("batch_chain_head") != head:
         raise ValueError("External collection batch-chain head is invalid")
@@ -225,6 +281,8 @@ def append_export(
     collection_start_utc: str,
     collection_end_utc: str,
     tca_tolerance_minutes: int = 30,
+    allocation_seed: int = 24072026,
+    calibration_fraction: float = 1 / 3,
 ) -> dict[str, Any]:
     """Append one immutable raw export to a collection without opening outcomes."""
     source_path, ledger_path, batches_dir = map(Path, (source_path, ledger_path, batches_dir))
@@ -238,7 +296,16 @@ def append_export(
             raise ValueError("TCA tolerance cannot change after collection starts")
         if ledger.get("collection_period") != requested_period:
             raise ValueError("Collection period cannot change after collection starts")
+        if ledger.get("schema_version") == 1:
+            raise ValueError("Legacy collection cannot be extended with prospective allocation")
+        allocation = ledger["allocation"]
+        if int(allocation["seed"]) != int(allocation_seed):
+            raise ValueError("Allocation seed cannot change after collection starts")
+        if float(allocation["calibration_fraction"]) != float(calibration_fraction):
+            raise ValueError("Calibration fraction cannot change after collection starts")
     else:
+        if not 0 < float(calibration_fraction) < 1:
+            raise ValueError("calibration_fraction must lie in (0, 1)")
         ledger = {
             "schema_version": SCHEMA_VERSION,
             "status": "collecting",
@@ -247,6 +314,14 @@ def append_export(
             "collection_period": requested_period,
             "batches": [],
             "batch_chain_head": None,
+            "allocation": {
+                "rule": "sha256-event-id",
+                "seed": int(allocation_seed),
+                "calibration_fraction": float(calibration_fraction),
+                "assigned_before_outcome_access": True,
+                "assignments": {},
+                "assignments_sha256": _assignment_sha256({}),
+            },
         }
         existing = pd.DataFrame()
     if any(batch["source_sha256"] == source_sha256 for batch in ledger["batches"]):
@@ -277,6 +352,16 @@ def append_export(
         raise ValueError("Source export contains no new CDM messages")
     accepted = pd.DataFrame(accepted_rows)
     accepted = _assign_persistent_events(accepted, existing, tca_tolerance_minutes)
+    assignments = ledger["allocation"]["assignments"]
+    for event_id in sorted(accepted["event_id"].astype(str).unique()):
+        cohort = allocate_prospective_cohort(
+            event_id, allocation_seed, calibration_fraction
+        )
+        if event_id in assignments and assignments[event_id] != cohort:
+            raise ValueError("Existing prospective cohort assignment changed")
+        assignments[event_id] = cohort
+    ledger["allocation"]["assignments_sha256"] = _assignment_sha256(assignments)
+    accepted["study_cohort"] = accepted["event_id"].astype(str).map(assignments)
     accepted["source_export_sha256"] = source_sha256
     accepted["collection_batch"] = len(ledger["batches"]) + 1
 
@@ -318,15 +403,41 @@ def materialize_collection(
     ledger_path: str | Path,
     features_output: str | Path,
     readiness_output: str | Path,
+    *,
+    calibration_features: str | Path | None = None,
+    evaluation_features: str | Path | None = None,
+    calibration_roster: str | Path | None = None,
+    evaluation_roster: str | Path | None = None,
+    allocation_output: str | Path | None = None,
 ) -> dict[str, Any]:
     """Build an outcome-blind snapshot from all verified immutable batches."""
     ledger_path = Path(ledger_path)
     features_output, readiness_output = Path(features_output), Path(readiness_output)
-    if features_output.exists() or readiness_output.exists():
-        raise FileExistsError("Collection snapshot outputs already exist")
+    cohort_options = (
+        calibration_features, evaluation_features, calibration_roster,
+        evaluation_roster, allocation_output,
+    )
+    if any(value is not None for value in cohort_options) and not all(
+        value is not None for value in cohort_options
+    ):
+        raise ValueError(
+            "Cohort materialization requires calibration/evaluation features, "
+            "rosters, and allocation output together"
+        )
+    cohort_paths = [Path(value) for value in cohort_options if value is not None]
+    all_outputs = [features_output, readiness_output, *cohort_paths]
+    existing_outputs = [str(path) for path in all_outputs if path.exists()]
+    if existing_outputs:
+        raise FileExistsError(
+            f"Collection snapshot outputs already exist: {existing_outputs}"
+        )
     ledger, complete = read_collection(ledger_path)
     if complete.empty:
         raise ValueError("Collection contains no messages")
+    if cohort_paths and ledger["status"] != "sealed":
+        raise ValueError(
+            "Prospective cohort artifacts require a sealed outcome-blind collection"
+        )
     features = outcome_blind_features(complete)
     report = readiness_report(complete)
     report["collection"] = {
@@ -335,12 +446,94 @@ def materialize_collection(
         "status": ledger["status"],
         "batches": len(ledger["batches"]),
         "source_sha256s": [batch["source_sha256"] for batch in ledger["batches"]],
+        "allocation_seed": None if ledger.get("allocation") is None else ledger["allocation"]["seed"],
+        "calibration_fraction": None if ledger.get("allocation") is None else ledger["allocation"]["calibration_fraction"],
+        "assignments_sha256": None if ledger.get("allocation") is None else ledger["allocation"]["assignments_sha256"],
     }
-    written = []
+    written: list[Path] = []
     try:
         _atomic_parquet(features, features_output)
         written.append(features_output)
         report["features_sha256"] = file_sha256(features_output)
+
+        if cohort_paths:
+            assignments = ledger["allocation"]["assignments"]
+            calibration_ids = sorted(
+                event_id for event_id, cohort in assignments.items()
+                if cohort == "calibration"
+            )
+            evaluation_ids = sorted(
+                event_id for event_id, cohort in assignments.items()
+                if cohort == "evaluation"
+            )
+            if not calibration_ids or not evaluation_ids:
+                raise ValueError(
+                    "Prospective allocation must contain both calibration and evaluation events"
+                )
+            calibration_frame = features.loc[
+                features["event_id"].astype(str).isin(calibration_ids)
+            ].copy()
+            evaluation_frame = features.loc[
+                features["event_id"].astype(str).isin(evaluation_ids)
+            ].copy()
+            if calibration_frame.empty or evaluation_frame.empty:
+                raise ValueError(
+                    "Both prospective cohorts require at least one outcome-blind feature row"
+                )
+            calibration_roster_frame = pd.DataFrame({"event_id": calibration_ids})
+            evaluation_roster_frame = pd.DataFrame({"event_id": evaluation_ids})
+            output_frames = (
+                (calibration_frame, Path(calibration_features)),
+                (evaluation_frame, Path(evaluation_features)),
+                (calibration_roster_frame, Path(calibration_roster)),
+                (evaluation_roster_frame, Path(evaluation_roster)),
+            )
+            for frame, path in output_frames:
+                _atomic_parquet(frame, path)
+                written.append(path)
+            allocation_artifact = {
+                "schema_version": 1,
+                "status": "assigned-before-outcome-access",
+                "outcomes_accessed": False,
+                "ledger_path": str(ledger_path.resolve()),
+                "ledger_sha256": file_sha256(ledger_path),
+                "collection_status": ledger["status"],
+                "rule": ledger["allocation"]["rule"],
+                "seed": ledger["allocation"]["seed"],
+                "calibration_fraction": ledger["allocation"]["calibration_fraction"],
+                "assignments_sha256": ledger["allocation"]["assignments_sha256"],
+                "events": len(assignments),
+                "calibration_events": len(calibration_ids),
+                "evaluation_events": len(evaluation_ids),
+                "calibration_feature_events": int(
+                    calibration_frame["event_id"].nunique()
+                ),
+                "evaluation_feature_events": int(
+                    evaluation_frame["event_id"].nunique()
+                ),
+                "outputs": {
+                    "calibration_features": {
+                        "path": str(Path(calibration_features).resolve()),
+                        "sha256": file_sha256(calibration_features),
+                    },
+                    "evaluation_features": {
+                        "path": str(Path(evaluation_features).resolve()),
+                        "sha256": file_sha256(evaluation_features),
+                    },
+                    "calibration_roster": {
+                        "path": str(Path(calibration_roster).resolve()),
+                        "sha256": file_sha256(calibration_roster),
+                    },
+                    "evaluation_roster": {
+                        "path": str(Path(evaluation_roster).resolve()),
+                        "sha256": file_sha256(evaluation_roster),
+                    },
+                },
+            }
+            _atomic_json(allocation_artifact, Path(allocation_output))
+            written.append(Path(allocation_output))
+            report["prospective_allocation"] = allocation_artifact
+
         _atomic_json(report, readiness_output)
         written.append(readiness_output)
     except Exception:
@@ -350,28 +543,125 @@ def materialize_collection(
     return report
 
 
+def seal_collection(ledger_path: str | Path) -> dict[str, Any]:
+    """Stop ingestion without deriving or accessing terminal labels."""
+    ledger_path = Path(ledger_path)
+    ledger, complete = read_collection(ledger_path)
+    if ledger["status"] != "collecting":
+        raise ValueError("Only a collecting external collection can be sealed")
+    if complete.empty:
+        raise ValueError("Cannot seal an empty external collection")
+    period_end = pd.Timestamp(ledger["collection_period"]["end_utc"])
+    now = pd.Timestamp.now(tz="UTC")
+    if now < period_end:
+        raise ValueError(
+            "Collection period has not ended; early sealing would permit outcome-dependent selection"
+        )
+    ledger["status"] = "sealed"
+    ledger["sealed_at_utc"] = datetime.now(timezone.utc).isoformat()
+    ledger["sealed_messages"] = int(len(complete))
+    ledger["sealed_events"] = int(complete["event_id"].nunique())
+    ledger["sealed_assignments_sha256"] = ledger["allocation"]["assignments_sha256"]
+    _atomic_json(ledger, ledger_path)
+    return ledger
+
+
+
 def close_collection(
     ledger_path: str | Path,
     labels_output: str | Path,
+    *,
+    study_manifest: str | Path,
+    study_lock: str | Path,
+    calibration_labels_output: str | Path,
+    evaluation_labels_output: str | Path,
 ) -> dict[str, Any]:
-    """Irreversibly close collection and derive terminal event labels once."""
+    """Open outcomes once and publish labels only through frozen cohort rosters."""
     ledger_path, labels_output = Path(ledger_path), Path(labels_output)
-    if labels_output.exists():
-        raise FileExistsError(f"Labels output already exists: {labels_output}")
+    calibration_labels_output = Path(calibration_labels_output)
+    evaluation_labels_output = Path(evaluation_labels_output)
+    label_outputs = [
+        labels_output, calibration_labels_output, evaluation_labels_output,
+    ]
+    existing = [str(path) for path in label_outputs if path.exists()]
+    if existing:
+        raise FileExistsError(f"Label outputs already exist: {existing}")
     ledger, complete = read_collection(ledger_path)
-    if ledger["status"] != "collecting":
-        raise ValueError("External collection is already closed")
+    if ledger["status"] != "sealed":
+        raise ValueError(
+            "External collection must be sealed and its cohorts frozen before labels are derived"
+        )
+    if ledger.get("sealed_assignments_sha256") != ledger["allocation"]["assignments_sha256"]:
+        raise ValueError("Cohort assignments changed after collection sealing")
+    study, study_sha256 = read_locked_study(study_manifest, study_lock)
+    allocation = study.get("allocation")
+    if not isinstance(allocation, dict):
+        raise ValueError("Frozen study is not bound to a prospective allocation")
+    if allocation.get("collection_status") != "sealed":
+        raise ValueError("Frozen study allocation was not created from a sealed collection")
+    current_ledger_sha256 = file_sha256(ledger_path)
+    if allocation.get("ledger_sha256") != current_ledger_sha256:
+        raise ValueError("Frozen study does not match the sealed collection ledger")
+    if allocation.get("assignments_sha256") != ledger["allocation"]["assignments_sha256"]:
+        raise ValueError("Frozen study does not match the prospective cohort assignments")
     labels = derive_event_labels(complete, collection_complete=True)
-    _atomic_parquet(labels, labels_output)
+    calibration_ids = set(study["cohorts"]["calibration"]["event_ids"])
+    evaluation_ids = set(study["cohorts"]["evaluation"]["event_ids"])
+    labelled_ids = set(labels["event_id"].astype(str))
+    if calibration_ids.intersection(evaluation_ids):
+        raise ValueError("Frozen study cohorts overlap")
+    if calibration_ids.union(evaluation_ids) != labelled_ids:
+        missing = len(labelled_ids.difference(calibration_ids.union(evaluation_ids)))
+        extra = len(calibration_ids.union(evaluation_ids).difference(labelled_ids))
+        raise ValueError(
+            f"Frozen study label denominator mismatch: {missing} unassigned and {extra} unknown events"
+        )
+    calibration_labels = labels.loc[
+        labels["event_id"].astype(str).isin(calibration_ids)
+    ].copy()
+    evaluation_labels = labels.loc[
+        labels["event_id"].astype(str).isin(evaluation_ids)
+    ].copy()
+    written: list[Path] = []
+    try:
+        for frame, path in (
+            (labels, labels_output),
+            (calibration_labels, calibration_labels_output),
+            (evaluation_labels, evaluation_labels_output),
+        ):
+            _atomic_parquet(frame, path)
+            written.append(path)
+    except Exception:
+        for path in written:
+            path.unlink(missing_ok=True)
+        raise
     ledger["status"] = "closed"
     ledger["closed_at_utc"] = datetime.now(timezone.utc).isoformat()
     ledger["labels_path"] = os.path.relpath(labels_output, ledger_path.parent)
     ledger["labels_sha256"] = file_sha256(labels_output)
+    ledger["calibration_labels_path"] = os.path.relpath(
+        calibration_labels_output, ledger_path.parent
+    )
+    ledger["calibration_labels_sha256"] = file_sha256(
+        calibration_labels_output
+    )
+    ledger["evaluation_labels_path"] = os.path.relpath(
+        evaluation_labels_output, ledger_path.parent
+    )
+    ledger["evaluation_labels_sha256"] = file_sha256(
+        evaluation_labels_output
+    )
+    ledger["calibration_events"] = int(len(calibration_labels))
+    ledger["evaluation_events"] = int(len(evaluation_labels))
+    ledger["study_manifest_path"] = str(Path(study_manifest).resolve())
+    ledger["study_manifest_sha256"] = study_sha256
+    ledger["study_lock_sha256"] = file_sha256(study_lock)
     ledger["labelled_events"] = int(len(labels))
     ledger["positive_events"] = int(labels["y"].sum())
     try:
         _atomic_json(ledger, ledger_path)
     except Exception:
-        labels_output.unlink(missing_ok=True)
+        for path in label_outputs:
+            path.unlink(missing_ok=True)
         raise
     return ledger

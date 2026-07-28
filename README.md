@@ -120,7 +120,7 @@ python scripts/audit_external_cdms.py \
   --collection-complete
 ```
 
-For repeated exports, use the append-only collection ledger. The collection period and TCA grouping tolerance are fixed on the first append; every raw export is bound by SHA-256, accepted messages are stored in immutable Parquet batches, and the ledger links batches with a hash chain. Re-exported messages are deduplicated only when their normalized content is identical. Conflicting copies are rejected. Existing event IDs remain stable when later CDMs shift the predicted TCA within the frozen tolerance.
+For repeated exports, use the append-only collection ledger. The collection period, TCA grouping tolerance, allocation seed, and calibration fraction are fixed on the first append. Every new event is assigned immediately by a SHA-256 rule using only `event_id` and the frozen seed; no `Pc`, label, mission group, or later history enters the assignment. Every raw export is bound by SHA-256, accepted messages are stored in immutable Parquet batches, and batches form a hash chain. Re-exported messages are deduplicated only when normalized content is identical. Conflicting copies are rejected. Existing event IDs remain stable when later CDMs shift TCA within the frozen tolerance.
 
 ```bash
 python scripts/collect_external_cdms.py append \
@@ -128,23 +128,56 @@ python scripts/collect_external_cdms.py append \
   --ledger data/new/collection.json \
   --batches-dir data/new/batches \
   --collection-start-utc 2026-08-01T00:00:00Z \
-  --collection-end-utc 2027-08-01T00:00:00Z
-
-python scripts/collect_external_cdms.py snapshot \
-  --ledger data/new/collection.json \
-  --features-output data/new/current_features.parquet \
-  --readiness-output data/new/current_readiness.json
+  --collection-end-utc 2027-08-01T00:00:00Z \
+  --allocation-seed 24072026 \
+  --calibration-fraction 0.3333333333333333
 ```
 
-After the predeclared collection period ends, close it once and derive terminal labels:
+After the predeclared period ends, seal ingestion without deriving labels:
+
+```bash
+python scripts/collect_external_cdms.py seal \
+  --ledger data/new/collection.json
+```
+
+A sealed collection can then produce disjoint outcome-blind feature files and complete denominator rosters. Events without scoreable rows remain in their assigned roster and therefore remain in later safety denominators.
+
+```bash
+python scripts/collect_external_cdms.py snapshot \
+  --ledger data/new/collection.json \
+  --features-output data/new/all_features.parquet \
+  --readiness-output data/new/readiness.json \
+  --calibration-features data/new/calibration_features.parquet \
+  --evaluation-features data/new/evaluation_features.parquet \
+  --calibration-roster data/new/calibration_roster.parquet \
+  --evaluation-roster data/new/evaluation_roster.parquet \
+  --allocation-output data/new/allocation.json
+
+python scripts/freeze_new_study.py \
+  --calibration-features data/new/calibration_features.parquet \
+  --evaluation-features data/new/evaluation_features.parquet \
+  --calibration-roster data/new/calibration_roster.parquet \
+  --evaluation-roster data/new/evaluation_roster.parquet \
+  --allocation-manifest data/new/allocation.json \
+  --preregistration artifacts/next_validation_preregistration_v12.json \
+  --preregistration-lock artifacts/next_validation_preregistration_v12.lock \
+  --output artifacts/new_study.json \
+  --lock artifacts/new_study.lock
+```
+
+Only after the study manifest is locked can terminal labels be derived. The close command verifies the sealed ledger and allocation digest against the locked study, then writes full, calibration, and evaluation labels according to the already frozen rosters.
 
 ```bash
 python scripts/collect_external_cdms.py close \
   --ledger data/new/collection.json \
-  --labels-output data/new/final_labels.parquet
+  --labels-output data/new/all_labels.parquet \
+  --calibration-labels-output data/new/calibration_labels.parquet \
+  --evaluation-labels-output data/new/evaluation_labels.parquet \
+  --study-manifest artifacts/new_study.json \
+  --study-lock artifacts/new_study.lock
 ```
 
-Closing is irreversible: subsequent appends and a second label derivation are rejected. Snapshot features remain outcome-blind and can be inspected during accumulation, while labels are unavailable until closure.
+The enforced lifecycle is `collecting → sealed → study-frozen → closed`. Early sealing before the collection end date is rejected. Labels cannot be created from an unsealed collection or without a matching one-shot study lock. Closing is irreversible; subsequent appends and a second label derivation are rejected.
 
 The script does not download protected data, store credentials, or assert redistribution rights. Space-Track's public CDM query currently requires authentication. The 2026 TraCSS Conjunction Assessment Verification Dataset is CC0 and useful for screening-geometry diagnostics, but its answer keys contain conjunction snapshots rather than repeated 2–7 day CDM histories; it cannot by itself confirm the sequential v13 policy. Sources: [Space-Track CDM documentation](https://www.space-track.org/documentation), [TraCSS verification dataset](https://space.commerce.gov/dataset-for-conjunction-assessment-verification/), and the [TraCSS test-set user guide](https://space.commerce.gov/wp-content/uploads/2026/03/Conjunction_Screening_Testset_Users_Guide.pdf).
 

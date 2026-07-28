@@ -79,14 +79,45 @@ def _decision_window(preregistration: dict[str, Any]) -> tuple[float, float] | N
     return minimum, maximum
 
 
+def _read_denominator_roster(path: str | Path) -> list[str]:
+    path = Path(path)
+    if path.suffix.lower() == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        values = payload.get("event_ids") if isinstance(payload, dict) else payload
+        roster = pd.DataFrame({"event_id": values})
+    else:
+        roster = pd.read_parquet(path)
+    if "event_id" not in roster.columns:
+        raise ValueError("Denominator roster must contain event_id")
+    if roster["event_id"].isna().any():
+        raise ValueError("Denominator roster event_id must not contain missing values")
+    values = roster["event_id"].astype(str)
+    if values.duplicated().any():
+        raise ValueError("Denominator roster must contain one row per event_id")
+    if values.empty:
+        raise ValueError("Denominator roster must contain at least one event")
+    return sorted(values.tolist())
+
+
 def _cohort_record(
     path: str | Path,
     decision_window: tuple[float, float] | None = None,
+    denominator_roster: str | Path | None = None,
 ) -> dict[str, Any]:
     path = Path(path)
     frame = pd.read_parquet(path)
     minimum = None if decision_window is None else decision_window[0]
-    event_ids = _event_ids(frame, min_days_to_tca=minimum)
+    feature_event_ids = _event_ids(frame, min_days_to_tca=minimum)
+    event_ids = (
+        feature_event_ids
+        if denominator_roster is None
+        else _read_denominator_roster(denominator_roster)
+    )
+    absent = set(feature_event_ids).difference(event_ids)
+    if absent:
+        raise ValueError(
+            f"Feature file contains {len(absent)} event_id values outside the denominator roster"
+        )
     tca = pd.to_numeric(frame["time_to_tca"], errors="raise")
     record = {
         "path": str(path.resolve()),
@@ -94,9 +125,16 @@ def _cohort_record(
         "rows": int(len(frame)),
         "events": len(event_ids),
         "event_ids": event_ids,
+        "feature_events": len(feature_event_ids),
+        "feature_event_ids": feature_event_ids,
+        "no_feature_events": len(event_ids) - len(feature_event_ids),
         "time_to_tca_min": float(tca.min()),
         "time_to_tca_max": float(tca.max()),
         "columns": sorted(str(column) for column in frame.columns),
+        "denominator_roster": None if denominator_roster is None else {
+            "path": str(Path(denominator_roster).resolve()),
+            "sha256": file_sha256(denominator_roster),
+        },
     }
     if decision_window is not None:
         window_rows = tca.between(*decision_window, inclusive="both")
@@ -109,6 +147,22 @@ def _cohort_record(
     return record
 
 
+def _prospective_cohort(event_id: str, seed: int, calibration_fraction: float) -> str:
+    if not 0 < calibration_fraction < 1:
+        raise ValueError("Allocation calibration_fraction must lie in (0, 1)")
+    digest = hashlib.sha256(f"{int(seed)}:{event_id}".encode("utf-8")).digest()
+    value = int.from_bytes(digest[:8], "big") / 2**64
+    return "calibration" if value < calibration_fraction else "evaluation"
+
+
+def _assignment_digest(assignments: dict[str, str]) -> str:
+    raw = json.dumps(
+        assignments, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+
 def freeze_study(
     calibration_features: str | Path,
     evaluation_features: str | Path,
@@ -116,6 +170,9 @@ def freeze_study(
     preregistration_lock: str | Path,
     output: str | Path,
     lock: str | Path,
+    calibration_roster: str | Path | None = None,
+    evaluation_roster: str | Path | None = None,
+    allocation_manifest: str | Path | None = None,
 ) -> dict[str, Any]:
     """Freeze disjoint feature cohorts before event outcomes are opened."""
     output, lock = Path(output), Path(lock)
@@ -129,13 +186,80 @@ def freeze_study(
     preregistration_payload = json.loads(preregistration.read_text(encoding="utf-8"))
     decision_window = _decision_window(preregistration_payload)
 
-    calibration = _cohort_record(calibration_features, decision_window)
-    evaluation = _cohort_record(evaluation_features, decision_window)
+    calibration = _cohort_record(
+        calibration_features, decision_window, calibration_roster
+    )
+    evaluation = _cohort_record(
+        evaluation_features, decision_window, evaluation_roster
+    )
     overlap = set(calibration["event_ids"]).intersection(evaluation["event_ids"])
     if overlap:
         raise ValueError(f"Calibration and evaluation cohorts overlap by {len(overlap)} event_id values")
+
+    allocation_record = None
+    if allocation_manifest is not None:
+        allocation_path = Path(allocation_manifest)
+        allocation_payload = json.loads(allocation_path.read_text(encoding="utf-8"))
+        if allocation_payload.get("status") != "assigned-before-outcome-access":
+            raise ValueError("Allocation manifest is not frozen before outcome access")
+        if allocation_payload.get("outcomes_accessed") is not False:
+            raise ValueError("Allocation manifest has accessed outcomes")
+        if allocation_payload.get("collection_status") != "sealed":
+            raise ValueError("Allocation manifest must come from a sealed collection")
+        expected_counts = {
+            "calibration": len(calibration["event_ids"]),
+            "evaluation": len(evaluation["event_ids"]),
+        }
+        for cohort, count in expected_counts.items():
+            if int(allocation_payload.get(f"{cohort}_events", -1)) != count:
+                raise ValueError(
+                    f"Allocation manifest {cohort} roster does not match frozen study"
+                )
+        seed = int(allocation_payload.get("seed"))
+        fraction = float(allocation_payload.get("calibration_fraction"))
+        assignments = {
+            event_id: "calibration" for event_id in calibration["event_ids"]
+        }
+        assignments.update({
+            event_id: "evaluation" for event_id in evaluation["event_ids"]
+        })
+        expected_assignments = {
+            event_id: _prospective_cohort(event_id, seed, fraction)
+            for event_id in assignments
+        }
+        if assignments != expected_assignments:
+            raise ValueError(
+                "Frozen cohort rosters do not match the label-blind allocation rule"
+            )
+        if allocation_payload.get("assignments_sha256") != _assignment_digest(assignments):
+            raise ValueError("Allocation manifest assignment digest is invalid")
+        outputs = allocation_payload.get("outputs", {})
+        expected_paths = {
+            "calibration_features": calibration_features,
+            "evaluation_features": evaluation_features,
+            "calibration_roster": calibration_roster,
+            "evaluation_roster": evaluation_roster,
+        }
+        for name, expected_path in expected_paths.items():
+            record = outputs.get(name)
+            if expected_path is None or not isinstance(record, dict):
+                raise ValueError(f"Allocation manifest is missing {name}")
+            if file_sha256(expected_path) != record.get("sha256"):
+                raise ValueError(f"Allocation manifest {name} SHA-256 mismatch")
+        allocation_record = {
+            "path": str(allocation_path.resolve()),
+            "sha256": file_sha256(allocation_path),
+            "status": allocation_payload["status"],
+            "outcomes_accessed": False,
+            "collection_status": allocation_payload["collection_status"],
+            "ledger_sha256": allocation_payload.get("ledger_sha256"),
+            "assignments_sha256": allocation_payload.get("assignments_sha256"),
+            "rule": allocation_payload.get("rule"),
+            "seed": allocation_payload.get("seed"),
+            "calibration_fraction": allocation_payload.get("calibration_fraction"),
+        }
     manifest = {
-        "schema_version": 3,
+        "schema_version": 4,
         "status": "frozen-before-outcome-access",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "outcomes_accessed": False,
@@ -150,6 +274,7 @@ def freeze_study(
             "post_window_rows_forbidden": decision_window is not None,
             "explicit_outcome_columns_forbidden": True,
         },
+        "allocation": allocation_record,
         "cohorts": {"calibration": calibration, "evaluation": evaluation},
     }
     payload = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
@@ -196,7 +321,7 @@ def read_locked_study(manifest_path: str | Path, lock_path: str | Path) -> tuple
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("status") != "frozen-before-outcome-access" or manifest.get("outcomes_accessed") is not False:
         raise ValueError("Study manifest is not a label-blind frozen study")
-    if manifest.get("schema_version") not in {1, 2, 3}:
+    if manifest.get("schema_version") not in {1, 2, 3, 4}:
         raise ValueError("Unsupported study manifest schema")
     return manifest, digest
 
@@ -221,8 +346,12 @@ def validate_feature_cohort(
         pd.read_parquet(features_path),
         min_days_to_tca=minimum if firewall.get("post_window_rows_forbidden") else None,
     )
-    if actual_ids != expected["event_ids"]:
-        raise ValueError(f"{cohort} event roster does not match the frozen study")
+    expected_feature_ids = expected.get("feature_event_ids", expected["event_ids"])
+    if actual_ids != expected_feature_ids:
+        raise ValueError(f"{cohort} feature event roster does not match the frozen study")
+    roster_record = expected.get("denominator_roster")
+    if roster_record is not None and file_sha256(roster_record["path"]) != roster_record["sha256"]:
+        raise ValueError(f"{cohort} denominator roster does not match the frozen study")
     return digest
 
 

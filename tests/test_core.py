@@ -37,7 +37,8 @@ from run_demo import run_demo
 from confirm_policy import calibration_command, confirmation_command
 from audit_external_cdms import audit_external_export
 from external_collection import (
-    append_export, close_collection, materialize_collection, read_collection,
+    allocate_prospective_cohort, append_export, close_collection,
+    materialize_collection, read_collection, seal_collection,
 )
 from validation_plan import (
     evaluation_planning_table, maximum_passing_failures,
@@ -57,8 +58,8 @@ from snapshot_model import (
 )
 from partitions import event_labels, split_event_ids
 from study import (
-    freeze_study, read_locked_study, validate_feature_cohort, validate_label_roster,
-    validate_scored_cohort_roster,
+    file_sha256, freeze_study, read_locked_study, validate_feature_cohort,
+    validate_label_roster, validate_scored_cohort_roster,
 )
 from policy import (
     calibration_rank, calibrate_positive_threshold, cp_upper,
@@ -334,27 +335,37 @@ def test_external_collection_snapshot_is_outcome_blind_and_source_bound(tmp_path
     assert report["features_sha256"] == __import__("hashlib").sha256(features.read_bytes()).hexdigest()
 
 
-def test_external_collection_close_is_one_shot_and_blocks_append(tmp_path):
+def test_external_collection_close_requires_frozen_study(tmp_path):
     source = write_external_export(tmp_path / "source.json", [
         external_cdm_record("early", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z", 1e-8),
         external_cdm_record("late", "2026-01-06T12:00:00Z", "2026-01-07T00:10:00Z", 2e-5),
     ])
     ledger = tmp_path / "collection.json"
     batches = tmp_path / "batches"
-    append_export(source, ledger, batches, collection_start_utc="2026-01-01T00:00:00Z", collection_end_utc="2026-02-01T00:00:00Z")
-    labels = tmp_path / "labels.parquet"
-    result = close_collection(ledger, labels)
+    append_export(
+        source, ledger, batches,
+        collection_start_utc="2026-01-01T00:00:00Z",
+        collection_end_utc="2026-02-01T00:00:00Z",
+    )
+    with np.testing.assert_raises(ValueError):
+        close_collection(
+            ledger, tmp_path / "labels.parquet",
+            study_manifest=tmp_path / "missing-study.json",
+            study_lock=tmp_path / "missing-study.lock",
+            calibration_labels_output=tmp_path / "calibration-labels.parquet",
+            evaluation_labels_output=tmp_path / "evaluation-labels.parquet",
+        )
+    seal_collection(ledger)
+    with np.testing.assert_raises(FileNotFoundError):
+        close_collection(
+            ledger, tmp_path / "labels.parquet",
+            study_manifest=tmp_path / "missing-study.json",
+            study_lock=tmp_path / "missing-study.lock",
+            calibration_labels_output=tmp_path / "calibration-labels.parquet",
+            evaluation_labels_output=tmp_path / "evaluation-labels.parquet",
+        )
+    assert not (tmp_path / "labels.parquet").exists()
 
-    assert result["status"] == "closed"
-    assert result["positive_events"] == 1
-    assert pd.read_parquet(labels)["y"].tolist() == [1]
-    with np.testing.assert_raises(ValueError):
-        close_collection(ledger, tmp_path / "other-labels.parquet")
-    next_source = write_external_export(tmp_path / "next.json", [
-        external_cdm_record("m3", "2026-01-03T00:00:00Z", "2026-01-07T00:20:00Z")
-    ])
-    with np.testing.assert_raises(ValueError):
-        append_export(next_source, ledger, batches, collection_start_utc="2026-01-01T00:00:00Z", collection_end_utc="2026-02-01T00:00:00Z")
 
 
 def test_external_collection_locks_tca_tolerance(tmp_path):
@@ -410,6 +421,273 @@ def test_external_collection_rejects_messages_outside_frozen_period(tmp_path):
         )
     assert not ledger.exists()
     assert not (tmp_path / "batches").exists()
+
+
+def test_prospective_allocator_is_deterministic_and_label_blind():
+    assignments = [
+        allocate_prospective_cohort(f"event-{index}", 42, 1 / 3)
+        for index in range(1000)
+    ]
+    repeated = [
+        allocate_prospective_cohort(f"event-{index}", 42, 1 / 3)
+        for index in range(1000)
+    ]
+    assert assignments == repeated
+    calibration = assignments.count("calibration")
+    assert 280 < calibration < 390
+    assert assignments != [
+        allocate_prospective_cohort(f"event-{index}", 43, 1 / 3)
+        for index in range(1000)
+    ]
+
+
+def test_prospective_assignment_is_persisted_before_outcomes(tmp_path):
+    first = write_external_export(tmp_path / "first.json", [
+        external_cdm_record("a1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"),
+        dict(external_cdm_record("b1", "2026-01-01T00:00:00Z", "2026-01-08T00:00:00Z"), SAT2_OBJECT_DESIGNATOR="90002"),
+    ])
+    ledger_path = tmp_path / "collection.json"
+    ledger = append_export(
+        first, ledger_path, tmp_path / "batches",
+        collection_start_utc="2026-01-01T00:00:00Z",
+        collection_end_utc="2026-02-01T00:00:00Z",
+        allocation_seed=99,
+        calibration_fraction=0.5,
+    )
+    assert ledger["status"] == "collecting"
+    assert ledger["allocation"]["assigned_before_outcome_access"] is True
+    assert set(ledger["allocation"]["assignments"]) == set(
+        read_collection(ledger_path)[1]["event_id"].astype(str)
+    )
+    assert len(ledger["allocation"]["assignments_sha256"]) == 64
+
+
+def test_prospective_allocation_parameters_are_locked(tmp_path):
+    first = write_external_export(tmp_path / "first.json", [
+        external_cdm_record("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z")
+    ])
+    second = write_external_export(tmp_path / "second.json", [
+        external_cdm_record("m2", "2026-01-02T00:00:00Z", "2026-01-07T00:10:00Z")
+    ])
+    ledger = tmp_path / "collection.json"
+    batches = tmp_path / "batches"
+    common = dict(
+        collection_start_utc="2026-01-01T00:00:00Z",
+        collection_end_utc="2026-02-01T00:00:00Z",
+        allocation_seed=7,
+        calibration_fraction=0.4,
+    )
+    append_export(first, ledger, batches, **common)
+    with np.testing.assert_raises(ValueError):
+        append_export(second, ledger, batches, **{**common, "allocation_seed": 8})
+    with np.testing.assert_raises(ValueError):
+        append_export(second, ledger, batches, **{**common, "calibration_fraction": 0.5})
+
+
+def _prospective_two_cohort_collection(tmp_path):
+    records = []
+    for index in range(1, 25):
+        record = external_cdm_record(
+            f"m{index}", "2026-01-01T00:00:00Z", f"2026-01-{7 + index % 10:02d}T00:00:00Z"
+        )
+        record["SAT2_OBJECT_DESIGNATOR"] = str(90000 + index)
+        records.append(record)
+    source = write_external_export(tmp_path / "source.json", records)
+    ledger = tmp_path / "collection.json"
+    append_export(
+        source, ledger, tmp_path / "batches",
+        collection_start_utc="2026-01-01T00:00:00Z",
+        collection_end_utc="2026-02-01T00:00:00Z",
+        allocation_seed=42,
+        calibration_fraction=0.5,
+    )
+    seal_collection(ledger)
+    return ledger
+
+
+def test_materialize_collection_writes_disjoint_label_blind_cohorts(tmp_path):
+    ledger = _prospective_two_cohort_collection(tmp_path)
+    outputs = {
+        "features_output": tmp_path / "all-features.parquet",
+        "readiness_output": tmp_path / "readiness.json",
+        "calibration_features": tmp_path / "calibration-features.parquet",
+        "evaluation_features": tmp_path / "evaluation-features.parquet",
+        "calibration_roster": tmp_path / "calibration-roster.parquet",
+        "evaluation_roster": tmp_path / "evaluation-roster.parquet",
+        "allocation_output": tmp_path / "allocation.json",
+    }
+    report = materialize_collection(ledger, **outputs)
+    calibration = pd.read_parquet(outputs["calibration_features"])
+    evaluation = pd.read_parquet(outputs["evaluation_features"])
+    cal_roster = pd.read_parquet(outputs["calibration_roster"])
+    eval_roster = pd.read_parquet(outputs["evaluation_roster"])
+    allocation = json.loads(outputs["allocation_output"].read_text(encoding="utf-8"))
+
+    assert "y" not in calibration and "y" not in evaluation
+    assert set(calibration["event_id"]).isdisjoint(set(evaluation["event_id"]))
+    assert set(cal_roster["event_id"]).isdisjoint(set(eval_roster["event_id"]))
+    assert set(cal_roster["event_id"]) | set(eval_roster["event_id"]) == set(
+        read_collection(ledger)[1]["event_id"]
+    )
+    assert allocation["status"] == "assigned-before-outcome-access"
+    assert allocation["outcomes_accessed"] is False
+    assert report["prospective_allocation"]["assignments_sha256"] == allocation["assignments_sha256"]
+
+
+def test_freeze_study_uses_denominator_rosters_and_allocation_lineage(tmp_path):
+    ledger = _prospective_two_cohort_collection(tmp_path)
+    paths = {
+        "features_output": tmp_path / "all-features.parquet",
+        "readiness_output": tmp_path / "readiness.json",
+        "calibration_features": tmp_path / "calibration-features.parquet",
+        "evaluation_features": tmp_path / "evaluation-features.parquet",
+        "calibration_roster": tmp_path / "calibration-roster.parquet",
+        "evaluation_roster": tmp_path / "evaluation-roster.parquet",
+        "allocation_output": tmp_path / "allocation.json",
+    }
+    materialize_collection(ledger, **paths)
+    preregistration, preregistration_lock = _locked_preregistration(tmp_path)
+    manifest_path, lock_path = tmp_path / "study.json", tmp_path / "study.lock"
+    manifest = freeze_study(
+        paths["calibration_features"], paths["evaluation_features"],
+        preregistration, preregistration_lock, manifest_path, lock_path,
+        calibration_roster=paths["calibration_roster"],
+        evaluation_roster=paths["evaluation_roster"],
+        allocation_manifest=paths["allocation_output"],
+    )
+    assert manifest["schema_version"] == 4
+    assert len(manifest["allocation"]["sha256"]) == 64
+    assert manifest["cohorts"]["calibration"]["events"] == len(
+        pd.read_parquet(paths["calibration_roster"])
+    )
+    validate_feature_cohort(
+        paths["calibration_features"], manifest_path, lock_path, "calibration"
+    )
+
+
+def test_prospective_collection_cannot_be_sealed_before_period_end(tmp_path):
+    source = write_external_export(tmp_path / "source.json", [
+        external_cdm_record(
+            "m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"
+        )
+    ])
+    ledger = tmp_path / "collection.json"
+    append_export(
+        source, ledger, tmp_path / "batches",
+        collection_start_utc="2026-01-01T00:00:00Z",
+        collection_end_utc="2100-01-01T00:00:00Z",
+    )
+    with np.testing.assert_raises(ValueError):
+        seal_collection(ledger)
+    assert read_collection(ledger)[0]["status"] == "collecting"
+
+
+def test_freeze_study_rejects_tampered_allocation_rule(tmp_path):
+    ledger = _prospective_two_cohort_collection(tmp_path)
+    paths = {
+        "features_output": tmp_path / "all-features.parquet",
+        "readiness_output": tmp_path / "readiness.json",
+        "calibration_features": tmp_path / "calibration-features.parquet",
+        "evaluation_features": tmp_path / "evaluation-features.parquet",
+        "calibration_roster": tmp_path / "calibration-roster.parquet",
+        "evaluation_roster": tmp_path / "evaluation-roster.parquet",
+        "allocation_output": tmp_path / "allocation.json",
+    }
+    materialize_collection(ledger, **paths)
+    allocation = json.loads(paths["allocation_output"].read_text(encoding="utf-8"))
+    allocation["seed"] += 1
+    paths["allocation_output"].write_text(json.dumps(allocation), encoding="utf-8")
+    preregistration, preregistration_lock = _locked_preregistration(tmp_path)
+    with np.testing.assert_raises(ValueError):
+        freeze_study(
+            paths["calibration_features"], paths["evaluation_features"],
+            preregistration, preregistration_lock,
+            tmp_path / "study.json", tmp_path / "study.lock",
+            calibration_roster=paths["calibration_roster"],
+            evaluation_roster=paths["evaluation_roster"],
+            allocation_manifest=paths["allocation_output"],
+        )
+    assert not (tmp_path / "study.json").exists()
+    assert not (tmp_path / "study.lock").exists()
+
+
+def test_full_prospective_lifecycle_freezes_split_before_labels(tmp_path):
+    ledger = _prospective_two_cohort_collection(tmp_path)
+    paths = {
+        "features_output": tmp_path / "all-features.parquet",
+        "readiness_output": tmp_path / "readiness.json",
+        "calibration_features": tmp_path / "calibration-features.parquet",
+        "evaluation_features": tmp_path / "evaluation-features.parquet",
+        "calibration_roster": tmp_path / "calibration-roster.parquet",
+        "evaluation_roster": tmp_path / "evaluation-roster.parquet",
+        "allocation_output": tmp_path / "allocation.json",
+    }
+    materialize_collection(ledger, **paths)
+    preregistration, preregistration_lock = _locked_preregistration(tmp_path)
+    study_path, study_lock = tmp_path / "study.json", tmp_path / "study.lock"
+    manifest = freeze_study(
+        paths["calibration_features"], paths["evaluation_features"],
+        preregistration, preregistration_lock, study_path, study_lock,
+        calibration_roster=paths["calibration_roster"],
+        evaluation_roster=paths["evaluation_roster"],
+        allocation_manifest=paths["allocation_output"],
+    )
+    labels = tmp_path / "labels.parquet"
+    calibration_labels = tmp_path / "calibration-labels.parquet"
+    evaluation_labels = tmp_path / "evaluation-labels.parquet"
+    closed = close_collection(
+        ledger, labels,
+        study_manifest=study_path,
+        study_lock=study_lock,
+        calibration_labels_output=calibration_labels,
+        evaluation_labels_output=evaluation_labels,
+    )
+
+    cal = pd.read_parquet(calibration_labels)
+    evaluation = pd.read_parquet(evaluation_labels)
+    assert closed["status"] == "closed"
+    assert set(cal["event_id"].astype(str)) == set(
+        manifest["cohorts"]["calibration"]["event_ids"]
+    )
+    assert set(evaluation["event_id"].astype(str)) == set(
+        manifest["cohorts"]["evaluation"]["event_ids"]
+    )
+    assert set(cal["event_id"]).isdisjoint(set(evaluation["event_id"]))
+    assert len(cal) + len(evaluation) == len(pd.read_parquet(labels))
+    assert closed["study_manifest_sha256"] == file_sha256(study_path)
+    with np.testing.assert_raises(ValueError):
+        append_export(
+            tmp_path / "source.json", ledger, tmp_path / "batches",
+            collection_start_utc="2026-01-01T00:00:00Z",
+            collection_end_utc="2026-02-01T00:00:00Z",
+        )
+
+
+def test_denominator_roster_can_include_event_without_feature_rows(tmp_path):
+    calibration_features = tmp_path / "calibration-features.parquet"
+    evaluation_features = tmp_path / "evaluation-features.parquet"
+    pd.DataFrame({"event_id": ["cal-feature"], "time_to_tca": [6.0]}).to_parquet(calibration_features)
+    pd.DataFrame({"event_id": ["eval-feature"], "time_to_tca": [6.0]}).to_parquet(evaluation_features)
+    calibration_roster = tmp_path / "calibration-roster.parquet"
+    evaluation_roster = tmp_path / "evaluation-roster.parquet"
+    pd.DataFrame({"event_id": ["cal-feature", "cal-no-history"]}).to_parquet(calibration_roster)
+    pd.DataFrame({"event_id": ["eval-feature"]}).to_parquet(evaluation_roster)
+    preregistration, preregistration_lock = _locked_preregistration(tmp_path)
+    manifest = freeze_study(
+        calibration_features, evaluation_features,
+        preregistration, preregistration_lock,
+        tmp_path / "study.json", tmp_path / "study.lock",
+        calibration_roster=calibration_roster,
+        evaluation_roster=evaluation_roster,
+    )
+    assert manifest["cohorts"]["calibration"]["events"] == 2
+    assert manifest["cohorts"]["calibration"]["feature_events"] == 1
+    assert manifest["cohorts"]["calibration"]["no_feature_events"] == 1
+    validate_label_roster(
+        pd.DataFrame({"event_id": ["cal-feature", "cal-no-history"], "y": [0, 1]}),
+        manifest,
+        "calibration",
+    )
 
 
 def test_prefix_features_do_not_use_future_rows():
@@ -1761,7 +2039,7 @@ def test_frozen_study_records_outcome_firewall_and_window_coverage(tmp_path):
     )
     manifest, _ = read_locked_study(manifest_path, lock_path)
 
-    assert manifest["schema_version"] == 3
+    assert manifest["schema_version"] == 4
     assert manifest["outcome_firewall"] == {
         "decision_window_days": [2.0, 7.0],
         "explicit_outcome_columns_forbidden": True,
