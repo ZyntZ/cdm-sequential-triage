@@ -1308,6 +1308,102 @@ def test_frozen_study_detects_file_and_label_roster_drift(tmp_path):
         validate_feature_cohort(calibration_path, manifest_path, lock_path, "calibration")
 
 
+def _locked_preregistration(tmp_path, decision_window=(2.0, 7.0)):
+    import hashlib
+    preregistration = tmp_path / "preregistration.json"
+    preregistration.write_text(json.dumps({
+        "candidate": {"decision_window_days": list(decision_window)}
+    }) + "\n", encoding="utf-8")
+    lock = tmp_path / "preregistration.lock"
+    lock.write_text(json.dumps({
+        "preregistration_sha256": hashlib.sha256(
+            preregistration.read_bytes()
+        ).hexdigest()
+    }) + "\n", encoding="utf-8")
+    return preregistration, lock
+
+
+def test_freeze_study_rejects_post_window_rows_before_lock(tmp_path):
+    calibration = tmp_path / "calibration.parquet"
+    evaluation = tmp_path / "evaluation.parquet"
+    pd.DataFrame({
+        "event_id": ["cal", "cal"],
+        "time_to_tca": [6.0, 1.0],
+        "risk": [-8.0, -5.5],
+    }).to_parquet(calibration, index=False)
+    pd.DataFrame({
+        "event_id": ["eval"], "time_to_tca": [6.0], "risk": [-9.0]
+    }).to_parquet(evaluation, index=False)
+    preregistration, preregistration_lock = _locked_preregistration(tmp_path)
+    manifest, study_lock = tmp_path / "study.json", tmp_path / "study.lock"
+
+    with np.testing.assert_raises(ValueError):
+        freeze_study(
+            calibration, evaluation, preregistration, preregistration_lock,
+            manifest, study_lock,
+        )
+
+    assert not manifest.exists()
+    assert not study_lock.exists()
+
+
+def test_freeze_study_rejects_explicit_final_outcome_columns(tmp_path):
+    calibration = tmp_path / "calibration.parquet"
+    evaluation = tmp_path / "evaluation.parquet"
+    pd.DataFrame({
+        "event_id": ["cal"], "time_to_tca": [6.0], "final_risk": [-5.5]
+    }).to_parquet(calibration, index=False)
+    pd.DataFrame({
+        "event_id": ["eval"], "time_to_tca": [6.0], "risk": [-9.0]
+    }).to_parquet(evaluation, index=False)
+    preregistration, preregistration_lock = _locked_preregistration(tmp_path)
+
+    with np.testing.assert_raises(ValueError):
+        freeze_study(
+            calibration, evaluation, preregistration, preregistration_lock,
+            tmp_path / "study.json", tmp_path / "study.lock",
+        )
+
+
+def test_frozen_study_records_outcome_firewall_and_window_coverage(tmp_path):
+    calibration = tmp_path / "calibration.parquet"
+    evaluation = tmp_path / "evaluation.parquet"
+    pd.DataFrame({
+        "event_id": ["cal", "cal"],
+        "time_to_tca": [8.0, 6.0],
+        "risk": [-9.0, -8.0],
+    }).to_parquet(calibration, index=False)
+    pd.DataFrame({
+        "event_id": ["eval-a", "eval-b"],
+        "time_to_tca": [7.0, 9.0],
+        "risk": [-9.0, -10.0],
+    }).to_parquet(evaluation, index=False)
+    preregistration, preregistration_lock = _locked_preregistration(tmp_path)
+    manifest_path, lock_path = tmp_path / "study.json", tmp_path / "study.lock"
+
+    freeze_study(
+        calibration, evaluation, preregistration, preregistration_lock,
+        manifest_path, lock_path,
+    )
+    manifest, _ = read_locked_study(manifest_path, lock_path)
+
+    assert manifest["schema_version"] == 2
+    assert manifest["outcome_firewall"] == {
+        "decision_window_days": [2.0, 7.0],
+        "explicit_outcome_columns_forbidden": True,
+        "post_window_rows_forbidden": True,
+    }
+    assert manifest["cohorts"]["calibration"]["time_to_tca_min"] == 6.0
+    assert manifest["cohorts"]["calibration"]["decision_window_rows"] == 1
+    assert manifest["cohorts"]["evaluation"]["decision_window_events"] == 1
+    assert manifest["cohorts"]["evaluation"]["columns"] == [
+        "event_id", "risk", "time_to_tca"
+    ]
+    validate_feature_cohort(
+        calibration, manifest_path, lock_path, "calibration"
+    )
+
+
 def test_runtime_checkpoint_round_trip_continues_event_state(tmp_path):
     policy = SequentialTriagePolicy(
         safe_threshold=0.20, minimum_history=3, escalation_threshold=0.80

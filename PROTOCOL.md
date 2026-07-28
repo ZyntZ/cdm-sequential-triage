@@ -24,8 +24,8 @@ P(any SAFE-EXCLUDE during the eligible trajectory | Y=1).
 4. Confirmation: evaluate once on untouched internal evaluation events.
 5. External stress test: ESA official test only if released labels are obtained; it is not called an independent random test.
 
-## Frozen candidate specification
-The frozen candidate is the CatBoost snapshot score, PAC rank calibration, alpha = 0.10, 95% calibration confidence, a 2–7 day decision window, and minimum_history = 3 counted only after the window opens. This operating point was selected on development data because it had the highest observed safe-negative rate among candidates whose pooled development UCB95 did not exceed 10%. No calibration or evaluation outcomes were inspected for this choice.
+## Historical confirmation candidate
+The completed `confirmation_v1` candidate used the CatBoost snapshot score, PAC rank calibration, alpha = 0.10, 95% calibration confidence, a 2–7 day decision window, and minimum_history = 3 counted only after the window opens. This operating point was selected on development data before the locked evaluation. It remains the specification of the completed historical run and is not the candidate for the next study.
 
 Primary confirmatory metrics are event-level dangerous-exclusion count/rate with a one-sided 95% Clopper-Pearson upper bound, safe-negative rate, and median first SAFE-EXCLUDE time before TCA. The confirmation pass is run once after calibration.
 
@@ -38,5 +38,5 @@ The single locked evaluation run produced 4 dangerous exclusions among 73 positi
 Development tuning closed after the v11 calibration-stability diagnostic. The revised candidate is frozen in `artifacts/next_validation_preregistration_v12.json`; its lock must not be replaced or deleted. This candidate is post-confirmation development and has no valid claim on `confirmation_v1`, which is previously unblinded historical evidence.
 
 The next study requires new event sequences split into disjoint calibration and evaluation sets before outcome access. The planning target is at least 100 positive calibration events and 200 positive evaluation events. Model parameters, feature construction, hard-prefix weighting, decision window, minimum history, calibration mode, alpha, and primary success criterion are fixed by the preregistration artifact. No threshold or model tuning is permitted after new outcomes are accessed.
-Before labels are loaded, `freeze_new_study.py` must lock the exact label-blind calibration and evaluation feature files and their disjoint event rosters. Subsequent scoring, calibration, and confirmation must reference that locked study. This prevents replacement of events after outcomes become known and makes the claimed new-data boundary machine-verifiable.
+Before labels are loaded, `freeze_new_study.py` must lock the exact label-blind calibration and evaluation feature files and their disjoint event rosters. For the frozen 2–7 day policy, these feature files may retain earlier pre-window history but must not contain rows below 2 days to TCA or columns explicitly exposing final outcomes. The study manifest records the column roster, TCA range, and decision-window coverage. Subsequent scoring, calibration, and confirmation must reference that locked study. This prevents replacement of events after outcomes become known and makes the file and event boundary machine-verifiable. It does not prove that externally prepared features with neutral names were generated without outcome access; source-data handling still requires procedural separation and audit.
 
