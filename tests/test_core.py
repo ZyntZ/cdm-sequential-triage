@@ -50,6 +50,7 @@ from snapshot_model import (
 from partitions import event_labels, split_event_ids
 from study import (
     freeze_study, read_locked_study, validate_feature_cohort, validate_label_roster,
+    validate_scored_cohort_roster,
 )
 from policy import (
     calibration_rank, calibrate_positive_threshold, cp_upper,
@@ -1387,7 +1388,7 @@ def test_frozen_study_records_outcome_firewall_and_window_coverage(tmp_path):
     )
     manifest, _ = read_locked_study(manifest_path, lock_path)
 
-    assert manifest["schema_version"] == 2
+    assert manifest["schema_version"] == 3
     assert manifest["outcome_firewall"] == {
         "decision_window_days": [2.0, 7.0],
         "explicit_outcome_columns_forbidden": True,
@@ -1396,12 +1397,52 @@ def test_frozen_study_records_outcome_firewall_and_window_coverage(tmp_path):
     assert manifest["cohorts"]["calibration"]["time_to_tca_min"] == 6.0
     assert manifest["cohorts"]["calibration"]["decision_window_rows"] == 1
     assert manifest["cohorts"]["evaluation"]["decision_window_events"] == 1
+    assert manifest["cohorts"]["evaluation"]["decision_window_event_ids"] == ["eval-a"]
+    assert manifest["cohorts"]["calibration"]["decision_window_event_ids"] == ["cal"]
     assert manifest["cohorts"]["evaluation"]["columns"] == [
         "event_id", "risk", "time_to_tca"
     ]
     validate_feature_cohort(
         calibration, manifest_path, lock_path, "calibration"
     )
+
+
+def test_scored_cohort_roster_requires_every_window_event(tmp_path):
+    calibration = tmp_path / "calibration.parquet"
+    evaluation = tmp_path / "evaluation.parquet"
+    pd.DataFrame({
+        "event_id": ["cal"], "time_to_tca": [6.0], "risk": [-9.0]
+    }).to_parquet(calibration, index=False)
+    pd.DataFrame({
+        "event_id": ["eval-a", "eval-b", "pre-window-only"],
+        "time_to_tca": [7.0, 5.0, 9.0],
+        "risk": [-9.0, -8.0, -10.0],
+    }).to_parquet(evaluation, index=False)
+    preregistration, preregistration_lock = _locked_preregistration(tmp_path)
+    manifest_path, lock_path = tmp_path / "study.json", tmp_path / "study.lock"
+    freeze_study(
+        calibration, evaluation, preregistration, preregistration_lock,
+        manifest_path, lock_path,
+    )
+    manifest, _ = read_locked_study(manifest_path, lock_path)
+
+    validate_scored_cohort_roster(
+        pd.DataFrame({"event_id": ["eval-a", "eval-b"]}),
+        manifest,
+        "evaluation",
+    )
+    with np.testing.assert_raises(ValueError):
+        validate_scored_cohort_roster(
+            pd.DataFrame({"event_id": ["eval-a"]}),
+            manifest,
+            "evaluation",
+        )
+    with np.testing.assert_raises(ValueError):
+        validate_scored_cohort_roster(
+            pd.DataFrame({"event_id": ["eval-a", "eval-b", "other"]}),
+            manifest,
+            "evaluation",
+        )
 
 
 def test_runtime_checkpoint_round_trip_continues_event_state(tmp_path):

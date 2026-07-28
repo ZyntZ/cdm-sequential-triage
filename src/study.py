@@ -100,8 +100,12 @@ def _cohort_record(
     }
     if decision_window is not None:
         window_rows = tca.between(*decision_window, inclusive="both")
+        decision_event_ids = sorted(
+            frame.loc[window_rows, "event_id"].astype(str).unique().tolist()
+        )
         record["decision_window_rows"] = int(window_rows.sum())
-        record["decision_window_events"] = int(frame.loc[window_rows, "event_id"].nunique())
+        record["decision_window_events"] = len(decision_event_ids)
+        record["decision_window_event_ids"] = decision_event_ids
     return record
 
 
@@ -131,7 +135,7 @@ def freeze_study(
     if overlap:
         raise ValueError(f"Calibration and evaluation cohorts overlap by {len(overlap)} event_id values")
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "frozen-before-outcome-access",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "outcomes_accessed": False,
@@ -192,7 +196,7 @@ def read_locked_study(manifest_path: str | Path, lock_path: str | Path) -> tuple
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("status") != "frozen-before-outcome-access" or manifest.get("outcomes_accessed") is not False:
         raise ValueError("Study manifest is not a label-blind frozen study")
-    if manifest.get("schema_version") not in {1, 2}:
+    if manifest.get("schema_version") not in {1, 2, 3}:
         raise ValueError("Unsupported study manifest schema")
     return manifest, digest
 
@@ -233,3 +237,28 @@ def validate_label_roster(labels: pd.DataFrame, manifest: dict[str, Any], cohort
     actual = sorted(roster["event_id"].astype(str).tolist())
     if actual != manifest["cohorts"][cohort]["event_ids"]:
         raise ValueError(f"{cohort} labels do not match the frozen event roster")
+
+
+def validate_scored_cohort_roster(
+    scores: pd.DataFrame,
+    manifest: dict[str, Any],
+    cohort: str,
+) -> None:
+    """Require scores for every frozen event that enters the decision window."""
+    if cohort not in {"calibration", "evaluation"}:
+        raise ValueError("cohort must be 'calibration' or 'evaluation'")
+    if "event_id" not in scores.columns:
+        raise ValueError("Scores must contain event_id")
+    if scores["event_id"].isna().any():
+        raise ValueError("Score event_id must not contain missing values")
+    expected = manifest["cohorts"][cohort].get("decision_window_event_ids")
+    if expected is None:
+        return
+    actual = sorted(scores["event_id"].astype(str).unique().tolist())
+    if actual != expected:
+        missing = len(set(expected).difference(actual))
+        extra = len(set(actual).difference(expected))
+        raise ValueError(
+            f"{cohort} score roster does not match the frozen decision-window "
+            f"roster: {missing} missing and {extra} extra event_id values"
+        )

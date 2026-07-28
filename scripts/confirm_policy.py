@@ -22,7 +22,9 @@ from confirmation import (
     write_json,
 )
 from shift_gate import ConformalShiftGate
-from study import read_locked_study, validate_label_roster
+from study import (
+    read_locked_study, validate_label_roster, validate_scored_cohort_roster,
+)
 
 
 def _study_context(args: argparse.Namespace, cohort: str, labels: pd.DataFrame) -> tuple[dict | None, str | None]:
@@ -54,8 +56,10 @@ def calibration_command(args: argparse.Namespace) -> None:
         raise FileExistsError(f"Calibration output already exists: {args.output}")
     prefixes = pd.read_parquet(args.scores)
     labels = pd.read_parquet(args.labels)
-    _, study_hash = _study_context(args, "calibration", labels)
+    study, study_hash = _study_context(args, "calibration", labels)
     _validate_scored_study(prefixes, study_hash, "calibration")
+    if study is not None:
+        validate_scored_cohort_roster(prefixes, study, "calibration")
     shift_gate = None if args.gate is None else ConformalShiftGate.load(args.gate)
     manifest = None if args.model_manifest is None else read_json(args.model_manifest)
     if manifest is not None and manifest.get("calibration_required_on_genuinely_new_events") is True:
@@ -97,12 +101,14 @@ def _confirmation_preflight(
     if any(value is not None for value in study_options):
         if not all(value is not None for value in study_options):
             raise ValueError("--study-manifest and --study-lock must be used together")
-        _, study_hash = read_locked_study(args.study_manifest, args.study_lock)
+        study, study_hash = read_locked_study(args.study_manifest, args.study_lock)
     else:
-        study_hash = None
+        study, study_hash = None, None
 
     prefix_scores = pd.read_parquet(args.scores)
     _validate_scored_study(prefix_scores, study_hash, "evaluation")
+    if study is not None:
+        validate_scored_cohort_roster(prefix_scores, study, "evaluation")
     if artifact.get("study_manifest_sha256") != study_hash:
         raise ValueError("Calibration and evaluation do not use the same frozen study")
 
