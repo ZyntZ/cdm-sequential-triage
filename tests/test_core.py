@@ -2428,6 +2428,45 @@ def test_evidence_dashboard_builds_three_verified_tiers(tmp_path):
     assert "https://" not in document
 
 
+def test_evidence_dashboard_embeds_frontier_and_fold_stability(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    output = tmp_path / "evidence.html"
+    build_evidence_dashboard(root, output)
+    document = output.read_text(encoding="utf-8")
+
+    assert document.count("<svg class='evidence-plot'") == 2
+    assert "Development safety-automation frontier" in document
+    assert "Outer-fold coverage stability" in document
+    assert "UCB criterion 10%" in document
+    assert "catboost_tail_aligned" in document
+    assert "fold 0" in document and "-2.16 pp" in document
+    assert "fold 1" in document and "+6.97 pp" in document
+    assert "12/192 dangerous exclusions" in document
+    assert "2.43 percentage points" in document
+    assert "not confirmation evidence" in document
+    assert "https://" not in document
+
+
+def test_frontier_svg_marks_feasibility_and_pareto_status():
+    from evidence_dashboard import frontier_svg
+    summary = [
+        {"method": "safe", "danger_ucb": 0.09, "safe_negative_rate": 0.70,
+         "safety_feasible": True, "pareto_frontier": True},
+        {"method": "unsafe", "danger_ucb": 0.11, "safe_negative_rate": 0.80,
+         "safety_feasible": False, "pareto_frontier": False},
+    ]
+    document = frontier_svg(summary, 0.10)
+    assert "class='point pareto'" in document
+    assert "class='point infeasible'" in document
+    assert "UCB criterion 10%" in document
+
+
+def test_fold_stability_svg_rejects_incomplete_input():
+    from evidence_dashboard import fold_stability_svg
+    with np.testing.assert_raises(ValueError):
+        fold_stability_svg(pd.DataFrame({"method": ["catboost_tail_aligned"]}))
+
+
 def test_evidence_dashboard_refuses_overwrite(tmp_path):
     root = Path(__file__).resolve().parents[1]
     output = tmp_path / "evidence.html"
