@@ -246,7 +246,20 @@ def evaluate(
         label_ids = set(labels["event_id"].astype(str).unique())
         if not scored_ids.issubset(label_ids):
             raise ValueError("Evaluation scores contain event_id values without labels")
-    calibration_ids = set(calibration_artifact.get("calibration_event_ids", []))
+    calibration_event_ids = calibration_artifact.get("calibration_event_ids")
+    calibration_event_ids_sha256 = calibration_artifact.get(
+        "calibration_event_ids_sha256"
+    )
+    if not isinstance(calibration_event_ids, list) or not calibration_event_ids:
+        raise ValueError("Calibration artifact has no event roster")
+    if any(not isinstance(value, str) for value in calibration_event_ids):
+        raise ValueError("Calibration event roster must contain strings")
+    if len(calibration_event_ids) != len(set(calibration_event_ids)):
+        raise ValueError("Calibration event roster contains duplicate event_id values")
+    actual_calibration_digest = event_id_digest(pd.Series(calibration_event_ids))
+    if calibration_event_ids_sha256 != actual_calibration_digest:
+        raise ValueError("Calibration event roster does not match its SHA-256")
+    calibration_ids = set(calibration_event_ids)
     evaluation_ids = set(labels["event_id"].astype(str).unique())
     overlap = calibration_ids.intersection(evaluation_ids)
     if overlap:

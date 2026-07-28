@@ -862,6 +862,37 @@ def test_frozen_calibration_and_confirmation_are_disjoint():
     assert result["evaluation"]["negative_n"] == 2
 
 
+def test_calibration_event_roster_digest_matches_declared_ids():
+    calibration = calibrate(confirmation_scores())
+    from confirmation import event_id_digest
+    assert calibration["calibration_event_ids_sha256"] == event_id_digest(
+        pd.Series(calibration["calibration_event_ids"])
+    )
+
+
+def test_confirmation_rejects_tampered_calibration_event_roster():
+    calibration = calibrate(confirmation_scores())
+    calibration["calibration_event_ids"] = calibration["calibration_event_ids"][1:]
+    with np.testing.assert_raises(ValueError):
+        evaluate(confirmation_scores(event_offset=100), calibration)
+
+
+def test_confirmation_rejects_tampered_calibration_roster_digest():
+    calibration = calibrate(confirmation_scores())
+    calibration["calibration_event_ids_sha256"] = "0" * 64
+    with np.testing.assert_raises(ValueError):
+        evaluate(confirmation_scores(event_offset=100), calibration)
+
+
+def test_confirmation_rejects_duplicate_calibration_roster_ids():
+    calibration = calibrate(confirmation_scores())
+    calibration["calibration_event_ids"].append(
+        calibration["calibration_event_ids"][0]
+    )
+    with np.testing.assert_raises(ValueError):
+        evaluate(confirmation_scores(event_offset=100), calibration)
+
+
 def test_confirmation_rejects_event_overlap():
     calibration = calibrate(confirmation_scores())
     with np.testing.assert_raises(ValueError):
@@ -1581,6 +1612,9 @@ def runtime_calibration_artifact(model_hash="runtime-model", threshold=0.20):
         "shift_gate_sha256": None,
         "model_manifest_sha256": None,
         "calibration_event_ids": ["calibration-event"],
+        "calibration_event_ids_sha256": __import__("hashlib").sha256(
+            b"calibration-event"
+        ).hexdigest(),
     }
 
 
