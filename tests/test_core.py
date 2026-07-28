@@ -1596,6 +1596,60 @@ def test_tail_score_file_retains_gate_features(tmp_path):
     pd.testing.assert_frame_equal(scores, pd.read_parquet(output_path))
 
 
+def test_tail_score_file_cleans_temporary_output_after_fsync_failure(tmp_path, monkeypatch):
+    import score_final_tail_aligned as scoring_module
+    root = Path(__file__).resolve().parents[1]
+    features_path = tmp_path / "features.parquet"
+    output_path = tmp_path / "scores.parquet"
+    snapshot_training_frame(700).drop(columns="y").to_parquet(
+        features_path, index=False
+    )
+
+    def fail_fsync(_descriptor):
+        raise OSError("simulated score fsync failure")
+
+    monkeypatch.setattr(scoring_module.os, "fsync", fail_fsync)
+    with np.testing.assert_raises(OSError):
+        score_tail_file(
+            features_path,
+            root / "artifacts" / "catboost_tail_aligned_final_v13.cbm",
+            root / "artifacts" / "catboost_tail_aligned_final_v13.json",
+            output_path,
+        )
+
+    assert not output_path.exists()
+    assert not list(tmp_path.glob(".scores.parquet.*.tmp"))
+
+
+def test_tail_score_file_commits_with_os_replace(tmp_path, monkeypatch):
+    import score_final_tail_aligned as scoring_module
+    root = Path(__file__).resolve().parents[1]
+    features_path = tmp_path / "features.parquet"
+    output_path = tmp_path / "scores.parquet"
+    snapshot_training_frame(900).drop(columns="y").to_parquet(
+        features_path, index=False
+    )
+    calls = []
+    real_replace = scoring_module.os.replace
+
+    def record_replace(source, destination):
+        calls.append((Path(source), Path(destination)))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(scoring_module.os, "replace", record_replace)
+    scores = score_tail_file(
+        features_path,
+        root / "artifacts" / "catboost_tail_aligned_final_v13.cbm",
+        root / "artifacts" / "catboost_tail_aligned_final_v13.json",
+        output_path,
+    )
+
+    assert len(calls) == 1
+    assert calls[0][1] == output_path
+    assert calls[0][0].parent == output_path.parent
+    pd.testing.assert_frame_equal(scores, pd.read_parquet(output_path))
+
+
 def runtime_calibration_artifact(model_hash="runtime-model", threshold=0.20):
     return {
         "policy": {

@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -15,6 +17,28 @@ sys.path.insert(0, str(ROOT / "src"))
 from event_aligned_model import score_dynamic_frame
 from snapshot_model import file_sha256
 from study import validate_feature_cohort
+
+
+def _write_parquet_atomic(frame: pd.DataFrame, output_path: Path) -> None:
+    """Commit a Parquet artifact only after a complete, durable temporary write."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_name = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=output_path.parent,
+            prefix=f".{output_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary_name = stream.name
+        frame.to_parquet(temporary_name, index=False)
+        with open(temporary_name, "rb") as stream:
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, output_path)
+        temporary_name = None
+    finally:
+        if temporary_name is not None:
+            Path(temporary_name).unlink(missing_ok=True)
 
 
 def score_file(
@@ -62,8 +86,7 @@ def score_file(
     if study_hash is not None:
         scores["study_manifest_sha256"] = study_hash
         scores["study_cohort"] = cohort
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    scores.to_parquet(output_path, index=False)
+    _write_parquet_atomic(scores, output_path)
     return scores
 
 
