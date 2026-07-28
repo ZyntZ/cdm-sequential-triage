@@ -116,11 +116,14 @@ def build_dashboard(
     confirmation_path: Path | None = None,
     max_events: int = 250,
     checkpoint_path: Path | None = None,
+    max_chain_rows: int = 50,
 ) -> dict[str, Any]:
     if output_path.exists():
         raise FileExistsError(f"Dashboard output already exists: {output_path}")
     if max_events < 1:
         raise ValueError("max_events must be positive")
+    if max_chain_rows < 1:
+        raise ValueError("max_chain_rows must be positive")
     calibration = read_json(calibration_path)
     policy = validate_policy(calibration.get("policy"))
     rule = calibration.get("calibration")
@@ -128,6 +131,7 @@ def build_dashboard(
         raise ValueError("Calibration artifact has no threshold")
     audit = load_audits(audit_paths, calibration, calibration_path)
     chain_summary = None
+    chain: list[dict[str, Any]] = []
     if checkpoint_path is not None:
         checkpoint_path = Path(checkpoint_path)
         if not checkpoint_path.exists():
@@ -153,6 +157,8 @@ def build_dashboard(
             "head_sha256": chain_head,
             "checkpoint_sha256": checkpoint_digest,
             "checkpoint_file_sha256": file_sha256(checkpoint_path),
+            "displayed_rows": min(len(chain), max_chain_rows),
+            "clipped": len(chain) > max_chain_rows,
         }
     current = current_events(audit)
     shown = current.head(max_events)
@@ -225,6 +231,40 @@ def build_dashboard(
             f"{_escape(chain_summary['head_sha256'][:16])}…</small></div>"
         )
 
+    chain_table_html = ""
+    if chain_summary is not None:
+        displayed_chain = chain[-max_chain_rows:]
+        chain_rows = []
+        for index, entry in enumerate(
+            displayed_chain, start=len(chain) - len(displayed_chain) + 1
+        ):
+            previous_hash = entry.get("previous_entry_sha256")
+            previous_label = (
+                "GENESIS" if previous_hash is None
+                else f"{_escape(str(previous_hash)[:16])}…"
+            )
+            chain_rows.append(
+                "<tr>"
+                f"<td class='num'>{index}</td>"
+                f"<td class='num'>{int(entry['rows'])}</td>"
+                f"<td class='num'>{int(entry['events'])}</td>"
+                f"<td class='num'>{float(entry['min_time_to_tca']):.3f}</td>"
+                f"<td class='num'>{float(entry['max_time_to_tca']):.3f}</td>"
+                f"<td class='num'>{int(entry['first_audit_row'])}–{int(entry['last_audit_row'])}</td>"
+                f"<td class='event'>{_escape(str(entry['scores_sha256'])[:16])}…</td>"
+                f"<td class='event'>{_escape(str(entry['entry_sha256'])[:16])}…</td>"
+                f"<td class='event'>{previous_label}</td>"
+                "</tr>"
+            )
+        clipped_note = (
+            f" · showing last {len(displayed_chain)} of {len(chain)} batches"
+            if chain_summary["clipped"] else ""
+        )
+        chain_table_html = f"""
+<section class='panel summary'><div class='panel-title'>PROCESSED BATCH CHAIN</div>
+<div class='table-wrap'><table><thead><tr><th>#</th><th>CDM rows</th><th>Events</th><th>Min TCA, d</th><th>Max TCA, d</th><th>Audit rows</th><th>Scores SHA-256</th><th>Entry SHA-256</th><th>Previous entry</th></tr></thead><tbody>{''.join(chain_rows)}</tbody></table></div>
+<div class='source'>status {_escape(chain_summary['status'])} · head {_escape(chain_summary['head_sha256'])}{clipped_note}</div></section>"""
+
     document = f"""<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>CDM Triage Operator Console</title>
 <style>:root{{--bg:#071018;--panel:#0c1822;--line:#20313d;--text:#e7f0f4;--muted:#8fa5b2;--safe:#51d18a;--monitor:#f1bb4b;--danger:#ff6677;--cyan:#48c7df}}*{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(circle at top right,#122b38,#071018 42%);color:var(--text);font:14px/1.45 Inter,Segoe UI,Arial,sans-serif}}main{{max-width:1500px;margin:auto;padding:24px}}header{{display:flex;justify-content:space-between;gap:24px;align-items:flex-end;border-bottom:1px solid var(--line);padding-bottom:18px}}h1{{margin:0;font-size:28px}}.eyebrow,.panel-title{{color:var(--cyan);font:12px monospace;letter-spacing:.15em}}.status{{border:1px solid var(--monitor);color:var(--monitor);padding:8px 12px;border-radius:4px;font-weight:700}}.grid{{display:grid;grid-template-columns:repeat(12,1fr);gap:16px;margin-top:16px}}.panel{{background:linear-gradient(180deg,#10222d,#09161f);border:1px solid var(--line);border-radius:8px;padding:18px;box-shadow:0 12px 30px #0003}}.summary,.evidence{{grid-column:span 12}}.active,.timeline{{grid-column:span 8}}.policy,.lineage{{grid-column:span 4}}.panel-title{{margin-bottom:14px;font-weight:700}}.kpis,.evidence-grid{{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}}.kpi,.evidence-grid div{{background:#09151e;padding:13px;border-left:3px solid var(--cyan)}}.kpi span,.kpi small,.evidence-grid span,.evidence-grid small{{display:block;color:var(--muted)}}.kpi strong,.evidence-grid strong{{font-size:25px}}.kpi.safe{{border-color:var(--safe)}}.kpi.monitor{{border-color:var(--monitor)}}.kpi.escalate,.evidence-grid .fail{{border-color:var(--danger)}}.evidence-grid .pass{{border-color:var(--safe)}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px 10px;border-bottom:1px solid #182a36;text-align:left}}th{{color:var(--muted);font:11px monospace}}.num{{font-family:monospace;text-align:right}}.event{{font-family:monospace}}.reason,.source{{color:var(--muted);font-size:12px}}.table-wrap{{overflow:auto;max-height:620px}}.badge{{padding:3px 7px;border-radius:3px;font:700 11px monospace}}.badge.safe{{color:var(--safe);background:#0f3024}}.badge.monitor{{color:var(--monitor);background:#332713}}.badge.escalate{{color:var(--danger);background:#341722}}select{{background:#09151e;color:var(--text);border:1px solid var(--line);padding:8px;width:100%;margin-bottom:12px}}.timeline-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px}}.step{{padding:10px;border:1px solid var(--line);background:#09151e}}.step strong,.step span{{display:block}}.step span{{color:var(--muted);font-size:12px}}.caveat{{border-left:3px solid var(--danger);padding:10px;background:#21131a}}.source{{margin-top:12px;font-family:monospace;word-break:break-all}}footer{{margin:22px 0;color:var(--muted);font-size:12px}}@media(max-width:980px){{.active,.policy,.timeline,.lineage{{grid-column:span 12}}.kpis,.evidence-grid{{grid-template-columns:1fr 1fr}}header{{flex-direction:column;align-items:flex-start}}}}</style></head><body><main>
 <header><div><div class='eyebrow'>SPACE TRAFFIC · DECISION SUPPORT</div><h1>Sequential CDM Triage · Operator Console</h1><div>Calibrated event-level exclusion policy with auditable message-by-message decisions</div></div><div class='status'>HISTORICAL DEMO · NOT FOR OPERATIONS</div></header><div class='grid'>
@@ -232,7 +272,7 @@ def build_dashboard(
 <section class='panel active'><div class='panel-title'>ACTIVE EVENT QUEUE</div><div class='table-wrap'><table><thead><tr><th>Event</th><th>Current decision</th><th>Score</th><th>TCA, d</th><th>Seq</th><th>History</th><th>Gate</th><th>Reason</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>
 <section class='panel policy'><div class='panel-title'>FROZEN POLICY</div><table>{policy_rows}</table><p class='caveat'>SAFE-EXCLUDE removes an event from the current manual-review queue while automated ingestion continues. It is not a maneuver command.</p></section>
 <section class='panel timeline'><div class='panel-title'>EVENT DECISION TIMELINE</div><select id='event-select'></select><div id='timeline' class='timeline-grid'></div></section>
-<section class='panel lineage'><div class='panel-title'>ARTIFACT LINEAGE</div><table><thead><tr><th>Artifact</th><th>SHA-256</th></tr></thead><tbody>{lineage}</tbody></table><div class='source'>model {_escape(calibration.get('model_sha256'))}<br>shift gate {_escape(calibration.get('shift_gate_sha256'))}</div></section>{confirmation_html}</div>
+<section class='panel lineage'><div class='panel-title'>ARTIFACT LINEAGE</div><table><thead><tr><th>Artifact</th><th>SHA-256</th></tr></thead><tbody>{lineage}</tbody></table><div class='source'>model {_escape(calibration.get('model_sha256'))}<br>shift gate {_escape(calibration.get('shift_gate_sha256'))}</div></section>{chain_table_html}{confirmation_html}</div>
 <footer>Dataset: ESA Collision Avoidance Challenge, Zenodo 10.5281/zenodo.4463683, CC BY 4.0. Target is high final calculated collision probability, not collision occurrence. Statistical control requires event-level exchangeability and is not an operational guarantee under arbitrary distribution shift.</footer>
 <script>const events={timeline_json};const select=document.getElementById('event-select'),timeline=document.getElementById('timeline');function esc(s){{return String(s).replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));}}for(const e of events){{const o=document.createElement('option');o.value=e.key;o.textContent=e.label;select.appendChild(o);}}function render(){{const e=events.find(x=>x.key===select.value)||events[0];timeline.innerHTML='';if(!e)return;for(const u of e.updates){{const d=document.createElement('div');d.className='step';d.innerHTML=`<strong>${{esc(u.decision)}}</strong><span>seq ${{u.sequence}} · TCA ${{u.tca.toFixed(3)}} d</span><span>score ${{u.score.toPrecision(5)}} · history ${{u.history}}</span><span>${{esc(u.reason)}} · gate ${{u.gate?'ALLOW':'BLOCK'}}</span>`;timeline.appendChild(d);}}}}select.addEventListener('change',render);render();</script></main></body></html>"""
     _atomic_write(output_path, document)
@@ -247,12 +287,14 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-events", type=int, default=250)
+    parser.add_argument("--max-chain-rows", type=int, default=50)
     args = parser.parse_args()
     print(json.dumps(build_dashboard(
         args.audit, args.calibration, args.output,
         confirmation_path=args.confirmation,
         max_events=args.max_events,
         checkpoint_path=args.checkpoint,
+        max_chain_rows=args.max_chain_rows,
     ), ensure_ascii=False, indent=2))
 
 

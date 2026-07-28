@@ -1915,6 +1915,96 @@ def test_operator_dashboard_rejects_tampered_checkpoint(tmp_path):
         )
 
 
+def _two_batch_dashboard_inputs(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(
+        json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n"
+    )
+    checkpoint = tmp_path / "runtime.json"
+    first_scores = tmp_path / "first-scores.parquet"
+    second_scores = tmp_path / "second-scores.parquet"
+    first_audit = tmp_path / "first-audit.parquet"
+    second_audit = tmp_path / "second-audit.parquet"
+    pd.DataFrame({
+        "event_id": [1, 1],
+        "time_to_tca": [7.0, 6.0],
+        "catboost_tail_aligned": [0.10, 0.10],
+        "model_sha256": ["c" * 64] * 2,
+    }).to_parquet(first_scores, index=False)
+    pd.DataFrame({
+        "event_id": [1, 2],
+        "time_to_tca": [5.0, 7.0],
+        "catboost_tail_aligned": [0.10, 0.90],
+        "model_sha256": ["c" * 64] * 2,
+    }).to_parquet(second_scores, index=False)
+    run_replay(
+        first_scores, calibration, first_audit, checkpoint_path=checkpoint,
+    )
+    run_replay(
+        second_scores, calibration, second_audit, checkpoint_path=checkpoint,
+    )
+    return calibration, checkpoint, first_scores, second_scores, first_audit, second_audit
+
+
+def test_operator_dashboard_lists_two_processed_batches(tmp_path):
+    from confirmation import file_sha256
+    calibration, checkpoint, first_scores, second_scores, first_audit, second_audit = (
+        _two_batch_dashboard_inputs(tmp_path)
+    )
+    output = tmp_path / "dashboard.html"
+
+    summary = build_dashboard(
+        [first_audit, second_audit], calibration, output,
+        checkpoint_path=checkpoint,
+    )
+    document = output.read_text(encoding="utf-8")
+
+    assert summary["chain"]["status"] == "VERIFIED"
+    assert summary["chain"]["length"] == 2
+    assert summary["chain"]["displayed_rows"] == 2
+    assert summary["chain"]["clipped"] is False
+    assert "PROCESSED BATCH CHAIN" in document
+    assert file_sha256(first_scores)[:16] in document
+    assert file_sha256(second_scores)[:16] in document
+    assert "GENESIS" in document
+
+
+def test_operator_dashboard_clips_processed_batch_table(tmp_path):
+    from confirmation import file_sha256
+    calibration, checkpoint, first_scores, second_scores, first_audit, second_audit = (
+        _two_batch_dashboard_inputs(tmp_path)
+    )
+    output = tmp_path / "dashboard.html"
+
+    summary = build_dashboard(
+        [first_audit, second_audit], calibration, output,
+        checkpoint_path=checkpoint, max_chain_rows=1,
+    )
+    document = output.read_text(encoding="utf-8")
+
+    assert summary["chain"]["length"] == 2
+    assert summary["chain"]["displayed_rows"] == 1
+    assert summary["chain"]["clipped"] is True
+    assert file_sha256(first_scores)[:16] not in document
+    assert file_sha256(second_scores)[:16] in document
+    assert "showing last 1 of 2 batches" in document
+
+
+def test_operator_dashboard_rejects_invalid_chain_row_limit(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(
+        json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n"
+    )
+    audit = tmp_path / "audit.parquet"
+    dashboard_audit_frame(calibration).to_parquet(audit, index=False)
+
+    with np.testing.assert_raises(ValueError):
+        build_dashboard(
+            [audit], calibration, tmp_path / "dashboard.html",
+            max_chain_rows=0,
+        )
+
+
 def test_operator_dashboard_refuses_overwrite(tmp_path):
     calibration = tmp_path / "calibration.json"
     calibration.write_text(json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n")
