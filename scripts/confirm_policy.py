@@ -88,10 +88,11 @@ def calibration_command(args: argparse.Namespace) -> None:
     )
 
 
-def confirmation_command(args: argparse.Namespace) -> None:
-    artifact = read_json(args.calibration)
-    if args.output.exists():
-        raise FileExistsError(f"Confirmation output already exists: {args.output}")
+def _confirmation_preflight(
+    args: argparse.Namespace,
+    artifact: dict,
+) -> tuple[pd.DataFrame, str | None, ConformalShiftGate | None, dict | None]:
+    """Validate label-blind confirmation inputs before creating the one-shot lock."""
     study_options = (args.study_manifest, args.study_lock)
     if any(value is not None for value in study_options):
         if not all(value is not None for value in study_options):
@@ -99,6 +100,64 @@ def confirmation_command(args: argparse.Namespace) -> None:
         _, study_hash = read_locked_study(args.study_manifest, args.study_lock)
     else:
         study_hash = None
+
+    prefix_scores = pd.read_parquet(args.scores)
+    _validate_scored_study(prefix_scores, study_hash, "evaluation")
+    if artifact.get("study_manifest_sha256") != study_hash:
+        raise ValueError("Calibration and evaluation do not use the same frozen study")
+
+    shift_gate = None if args.gate is None else ConformalShiftGate.load(args.gate)
+    supplied_gate_hash = None if shift_gate is None else shift_gate.fingerprint()
+    if artifact.get("shift_gate_sha256") != supplied_gate_hash:
+        raise ValueError("Calibration artifact and supplied shift gate do not match")
+
+    manifest = None if args.model_manifest is None else read_json(args.model_manifest)
+    supplied_manifest_hash = (
+        None if args.model_manifest is None else file_sha256(args.model_manifest)
+    )
+    if artifact.get("model_manifest_sha256") != supplied_manifest_hash:
+        raise ValueError("Calibration artifact and supplied model manifest do not match")
+    if manifest is not None:
+        if manifest.get("calibration_required_on_genuinely_new_events") is True and study_hash is None:
+            raise ValueError("The frozen model requires a locked genuinely new study")
+        if policy_from_model_manifest(manifest) != artifact.get("policy"):
+            raise ValueError("Calibration policy and model manifest do not match")
+
+    policy = artifact.get("policy")
+    if not isinstance(policy, dict) or not isinstance(policy.get("score_column"), str):
+        raise ValueError("Calibration artifact has no valid policy")
+    required = {
+        "event_id", "time_to_tca", "model_sha256", policy["score_column"]
+    }
+    missing = required.difference(prefix_scores.columns)
+    if missing:
+        raise ValueError(f"Missing evaluation score columns: {sorted(missing)}")
+    model_hashes = prefix_scores["model_sha256"].dropna().astype(str).unique()
+    if len(model_hashes) != 1 or prefix_scores["model_sha256"].isna().any():
+        raise ValueError("Evaluation scores must contain exactly one model_sha256")
+    if str(model_hashes[0]) != str(artifact.get("model_sha256")):
+        raise ValueError("Calibration and evaluation scores use different models")
+    if prefix_scores["event_id"].isna().any():
+        raise ValueError("Evaluation score event_id must not contain missing values")
+    if prefix_scores.duplicated(["event_id", "time_to_tca"]).any():
+        raise ValueError("Duplicate event_id/time_to_tca rows are not allowed")
+    calibration_ids = set(artifact.get("calibration_event_ids", []))
+    evaluation_ids = set(prefix_scores["event_id"].astype(str).unique())
+    overlap = calibration_ids.intersection(evaluation_ids)
+    if overlap:
+        raise ValueError(
+            f"Calibration and evaluation overlap by {len(overlap)} event_id values"
+        )
+    return prefix_scores, study_hash, shift_gate, manifest
+
+
+def confirmation_command(args: argparse.Namespace) -> None:
+    artifact = read_json(args.calibration)
+    if args.output.exists():
+        raise FileExistsError(f"Confirmation output already exists: {args.output}")
+    prefix_scores, study_hash, shift_gate, manifest = _confirmation_preflight(
+        args, artifact
+    )
     lock_payload = {
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
         "calibration_artifact": str(args.calibration),
@@ -124,29 +183,14 @@ def confirmation_command(args: argparse.Namespace) -> None:
         ),
     }
     acquire_confirmation_lock(args.lock, lock_payload)
-    prefix_scores = pd.read_parquet(args.scores)
     event_labels = pd.read_parquet(args.labels)
-    _, study_hash = _study_context(args, "evaluation", event_labels)
-    _validate_scored_study(prefix_scores, study_hash, "evaluation")
-    if artifact.get("study_manifest_sha256") != study_hash:
-        raise ValueError("Calibration and evaluation do not use the same frozen study")
+    _study_context(args, "evaluation", event_labels)
     scored_ids = set(prefix_scores["event_id"].astype(str).unique())
     labels_for_scored_events = event_labels.loc[
         event_labels["event_id"].astype(str).isin(scored_ids)
     ]
     prefixes = attach_event_labels(prefix_scores, labels_for_scored_events)
-    shift_gate = None if args.gate is None else ConformalShiftGate.load(args.gate)
-    manifest = None if args.model_manifest is None else read_json(args.model_manifest)
-    if manifest is not None and manifest.get("calibration_required_on_genuinely_new_events") is True:
-        if study_hash is None:
-            raise ValueError("The frozen model requires a locked genuinely new study")
     policy = None if manifest is None else policy_from_model_manifest(manifest)
-    expected_manifest_hash = artifact.get("model_manifest_sha256")
-    supplied_manifest_hash = (
-        None if args.model_manifest is None else file_sha256(args.model_manifest)
-    )
-    if expected_manifest_hash != supplied_manifest_hash:
-        raise ValueError("Calibration artifact and supplied model manifest do not match")
     result = evaluate(
         prefixes, artifact, event_labels, shift_gate=shift_gate, policy=policy
     )

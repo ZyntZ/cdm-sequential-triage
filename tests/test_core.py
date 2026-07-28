@@ -30,7 +30,7 @@ from replay_scores import (
 from operator_dashboard import build_dashboard, current_events, load_audits
 from evidence_dashboard import build_evidence_dashboard
 from run_demo import run_demo
-from confirm_policy import calibration_command
+from confirm_policy import calibration_command, confirmation_command
 from validation_plan import (
     evaluation_planning_table, maximum_passing_failures,
     minimum_positive_events, pass_probability,
@@ -1711,6 +1711,112 @@ def test_replay_scores_requires_matching_gate_and_gate_columns(tmp_path):
         )
     with np.testing.assert_raises(ValueError):
         load_runtime(calibration)
+
+
+def test_confirmation_preflight_failure_does_not_burn_lock(tmp_path):
+    import argparse
+    calibration = tmp_path / "calibration.json"
+    artifact = runtime_calibration_artifact()
+    artifact["study_manifest_sha256"] = "expected-study"
+    calibration.write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+    scores = tmp_path / "evaluation.parquet"
+    pd.DataFrame({
+        "event_id": ["evaluation-event"],
+        "time_to_tca": [5.0],
+        "catboost_tail_aligned": [0.10],
+        "model_sha256": ["runtime-model"],
+        "study_manifest_sha256": ["wrong-study"],
+        "study_cohort": ["evaluation"],
+    }).to_parquet(scores, index=False)
+    args = argparse.Namespace(
+        scores=scores,
+        calibration=calibration,
+        labels=tmp_path / "unopened-labels.parquet",
+        output=tmp_path / "confirmation.json",
+        lock=tmp_path / "confirmation.lock",
+        gate=None,
+        model_manifest=None,
+        study_manifest=None,
+        study_lock=None,
+    )
+
+    with np.testing.assert_raises(ValueError):
+        confirmation_command(args)
+
+    assert not args.lock.exists()
+    assert not args.output.exists()
+
+
+def test_confirmation_command_writes_lock_and_result_after_valid_preflight(tmp_path):
+    import argparse
+    calibration = tmp_path / "calibration.json"
+    artifact = runtime_calibration_artifact()
+    artifact["policy"] = POLICY.copy()
+    artifact["study_manifest_sha256"] = None
+    calibration.write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+    scores = tmp_path / "evaluation.parquet"
+    pd.DataFrame({
+        "event_id": ["positive"] * 3 + ["negative"] * 3,
+        "time_to_tca": [7.0, 6.0, 5.0] * 2,
+        "catboost_snapshot": [0.90] * 3 + [0.10] * 3,
+        "model_sha256": ["runtime-model"] * 6,
+    }).to_parquet(scores, index=False)
+    labels = tmp_path / "labels.parquet"
+    pd.DataFrame({
+        "event_id": ["positive", "negative"], "y": [1, 0]
+    }).to_parquet(labels, index=False)
+    args = argparse.Namespace(
+        scores=scores,
+        calibration=calibration,
+        labels=labels,
+        output=tmp_path / "confirmation.json",
+        lock=tmp_path / "confirmation.lock",
+        gate=None,
+        model_manifest=None,
+        study_manifest=None,
+        study_lock=None,
+    )
+
+    confirmation_command(args)
+
+    assert args.lock.exists()
+    result = json.loads(args.output.read_text(encoding="utf-8"))
+    assert result["evaluation"]["danger_k"] == 0
+    assert result["evaluation"]["danger_n"] == 1
+    assert result["evaluation"]["safe_negative"] == 1
+    assert result["evaluation"]["negative_n"] == 1
+
+
+def test_confirmation_preflight_rejects_model_mismatch_before_lock(tmp_path):
+    import argparse
+    calibration = tmp_path / "calibration.json"
+    artifact = runtime_calibration_artifact()
+    artifact["study_manifest_sha256"] = None
+    calibration.write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+    scores = tmp_path / "evaluation.parquet"
+    pd.DataFrame({
+        "event_id": ["evaluation-event"],
+        "time_to_tca": [5.0],
+        "catboost_tail_aligned": [0.10],
+        "model_sha256": ["different-model"],
+    }).to_parquet(scores, index=False)
+    args = argparse.Namespace(
+        scores=scores,
+        calibration=calibration,
+        labels=tmp_path / "unopened-labels.parquet",
+        output=tmp_path / "confirmation.json",
+        lock=tmp_path / "confirmation.lock",
+        gate=None,
+        model_manifest=None,
+        study_manifest=None,
+        study_lock=None,
+    )
+
+    with np.testing.assert_raises(ValueError):
+        confirmation_command(args)
+
+    assert not args.lock.exists()
+    assert not args.output.exists()
 
 
 def test_calibration_command_refuses_existing_output(tmp_path):
