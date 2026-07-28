@@ -38,6 +38,8 @@ The single locked evaluation run produced 4 dangerous exclusions among 73 positi
 
 New external CDMs must be collected independently of the ESA development data and normalized without opening terminal outcomes. The current offline adapter accepts flattened Space-Track/TraCSS-style JSON, but event identity is reconstructed from the object pair and clustered TCA and therefore requires manual ambiguity review. Feature compatibility with the frozen model does not establish event-level exchangeability.
 
+The prospective acquisition period must be declared before the first export is appended and cannot change afterward. Each raw export and normalized immutable batch is bound by SHA-256. Batches form an append-only hash chain. Repeated message identifiers are accepted only when normalized content is identical; conflicting re-exports are rejected. Event identity is persisted across batches by object pair and TCA proximity under a frozen tolerance, with ambiguous assignments rejected rather than resolved automatically.
+
 The outcome-blind feature cohort contains only messages with at least two days to TCA. Event labels may be derived from the terminal finite `Pc` only after the collector explicitly attests that the observation window is complete. Readiness counts produced before that attestation are provisional and cannot be reported as confirmation results. The TraCSS Conjunction Assessment Verification Dataset is permitted for geometry and parser diagnostics, not as sequential confirmation evidence, because it supplies answer-key conjunction snapshots rather than repeated message histories.
 
 ## Revised candidate for a genuinely new study

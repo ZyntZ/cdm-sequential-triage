@@ -120,6 +120,32 @@ python scripts/audit_external_cdms.py \
   --collection-complete
 ```
 
+For repeated exports, use the append-only collection ledger. The collection period and TCA grouping tolerance are fixed on the first append; every raw export is bound by SHA-256, accepted messages are stored in immutable Parquet batches, and the ledger links batches with a hash chain. Re-exported messages are deduplicated only when their normalized content is identical. Conflicting copies are rejected. Existing event IDs remain stable when later CDMs shift the predicted TCA within the frozen tolerance.
+
+```bash
+python scripts/collect_external_cdms.py append \
+  --input data/external/export-2026-08-01.json \
+  --ledger data/new/collection.json \
+  --batches-dir data/new/batches \
+  --collection-start-utc 2026-08-01T00:00:00Z \
+  --collection-end-utc 2027-08-01T00:00:00Z
+
+python scripts/collect_external_cdms.py snapshot \
+  --ledger data/new/collection.json \
+  --features-output data/new/current_features.parquet \
+  --readiness-output data/new/current_readiness.json
+```
+
+After the predeclared collection period ends, close it once and derive terminal labels:
+
+```bash
+python scripts/collect_external_cdms.py close \
+  --ledger data/new/collection.json \
+  --labels-output data/new/final_labels.parquet
+```
+
+Closing is irreversible: subsequent appends and a second label derivation are rejected. Snapshot features remain outcome-blind and can be inspected during accumulation, while labels are unavailable until closure.
+
 The script does not download protected data, store credentials, or assert redistribution rights. Space-Track's public CDM query currently requires authentication. The 2026 TraCSS Conjunction Assessment Verification Dataset is CC0 and useful for screening-geometry diagnostics, but its answer keys contain conjunction snapshots rather than repeated 2–7 day CDM histories; it cannot by itself confirm the sequential v13 policy. Sources: [Space-Track CDM documentation](https://www.space-track.org/documentation), [TraCSS verification dataset](https://space.commerce.gov/dataset-for-conjunction-assessment-verification/), and the [TraCSS test-set user guide](https://space.commerce.gov/wp-content/uploads/2026/03/Conjunction_Screening_Testset_Users_Guide.pdf).
 
 This ingestion path makes prospective collection executable. It does not create independent evidence by itself. Confirmation remains blocked until enough genuinely new, disjoint, exchangeability-justified event sequences have been collected and frozen before outcomes are opened.

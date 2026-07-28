@@ -36,6 +36,9 @@ from evidence_dashboard import build_evidence_dashboard
 from run_demo import run_demo
 from confirm_policy import calibration_command, confirmation_command
 from audit_external_cdms import audit_external_export
+from external_collection import (
+    append_export, close_collection, materialize_collection, read_collection,
+)
 from validation_plan import (
     evaluation_planning_table, maximum_passing_failures,
     minimum_positive_events, pass_probability,
@@ -234,6 +237,179 @@ def test_external_cdm_audit_writes_labels_after_completion_attestation(tmp_path)
     )
     assert report["labels_written"] == 1
     assert pd.read_parquet(labels)["y"].tolist() == [1]
+
+
+def write_external_export(path, records):
+    path.write_text(json.dumps(records), encoding="utf-8")
+    return path
+
+
+def test_external_collection_appends_exports_and_preserves_event_id_under_tca_drift(tmp_path):
+    first = write_external_export(tmp_path / "first.json", [
+        external_cdm_record("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"),
+        external_cdm_record("m2", "2026-01-02T00:00:00Z", "2026-01-07T00:10:00Z"),
+    ])
+    second = write_external_export(tmp_path / "second.json", [
+        external_cdm_record("m2", "2026-01-02T00:00:00Z", "2026-01-07T00:10:00Z"),
+        external_cdm_record("m3", "2026-01-03T00:00:00Z", "2026-01-07T00:25:00Z"),
+    ])
+    ledger = tmp_path / "collection.json"
+    batches = tmp_path / "batches"
+    append_export(first, ledger, batches, collection_start_utc="2026-01-01T00:00:00Z", collection_end_utc="2026-02-01T00:00:00Z")
+    result = append_export(second, ledger, batches, collection_start_utc="2026-01-01T00:00:00Z", collection_end_utc="2026-02-01T00:00:00Z")
+    stored, complete = read_collection(ledger)
+
+    assert result["messages"] == 3
+    assert result["events"] == 1
+    assert result["batches"][1]["duplicate_messages"] == 1
+    assert complete["event_id"].nunique() == 1
+    assert complete["source_message_id"].tolist() == ["m1", "m2", "m3"]
+    assert stored["batch_chain_head"] == stored["batches"][-1]["entry_sha256"]
+    assert stored["batches"][1]["previous_entry_sha256"] == stored["batches"][0]["entry_sha256"]
+
+
+def test_external_collection_rejects_duplicate_source_and_conflicting_message(tmp_path):
+    original = external_cdm_record("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z")
+    first = write_external_export(tmp_path / "first.json", [original])
+    ledger = tmp_path / "collection.json"
+    batches = tmp_path / "batches"
+    append_export(first, ledger, batches, collection_start_utc="2026-01-01T00:00:00Z", collection_end_utc="2026-02-01T00:00:00Z")
+    with np.testing.assert_raises(ValueError):
+        append_export(first, ledger, batches, collection_start_utc="2026-01-01T00:00:00Z", collection_end_utc="2026-02-01T00:00:00Z")
+
+    conflict = dict(original, COLLISION_PROBABILITY="0.001")
+    second = write_external_export(tmp_path / "second.json", [conflict])
+    with np.testing.assert_raises(ValueError):
+        append_export(second, ledger, batches, collection_start_utc="2026-01-01T00:00:00Z", collection_end_utc="2026-02-01T00:00:00Z")
+    _, complete = read_collection(ledger)
+    assert len(complete) == 1
+
+
+def test_external_collection_verifies_source_and_batch_lineage(tmp_path):
+    source = write_external_export(tmp_path / "source.json", [
+        external_cdm_record("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z")
+    ])
+    ledger = tmp_path / "collection.json"
+    batches = tmp_path / "batches"
+    result = append_export(source, ledger, batches, collection_start_utc="2026-01-01T00:00:00Z", collection_end_utc="2026-02-01T00:00:00Z")
+    batch_path = ledger.parent / result["batches"][0]["artifact_path"]
+    batch = pd.read_parquet(batch_path)
+    batch.loc[0, "risk"] = -3.0
+    batch.to_parquet(batch_path, index=False)
+    with np.testing.assert_raises(ValueError):
+        read_collection(ledger)
+
+
+def test_external_collection_rejects_tampered_hash_chain(tmp_path):
+    source = write_external_export(tmp_path / "source.json", [
+        external_cdm_record("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z")
+    ])
+    ledger = tmp_path / "collection.json"
+    append_export(source, ledger, tmp_path / "batches", collection_start_utc="2026-01-01T00:00:00Z", collection_end_utc="2026-02-01T00:00:00Z")
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    payload["batches"][0]["accepted_messages"] = 9
+    ledger.write_text(json.dumps(payload), encoding="utf-8")
+    with np.testing.assert_raises(ValueError):
+        read_collection(ledger)
+
+
+def test_external_collection_snapshot_is_outcome_blind_and_source_bound(tmp_path):
+    source = write_external_export(tmp_path / "source.json", [
+        external_cdm_record("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"),
+        external_cdm_record("m2", "2026-01-02T00:00:00Z", "2026-01-07T00:10:00Z"),
+        external_cdm_record("m3", "2026-01-03T00:00:00Z", "2026-01-07T00:20:00Z", 2e-5),
+    ])
+    ledger = tmp_path / "collection.json"
+    append_export(source, ledger, tmp_path / "batches", collection_start_utc="2026-01-01T00:00:00Z", collection_end_utc="2026-02-01T00:00:00Z")
+    features = tmp_path / "features.parquet"
+    readiness = tmp_path / "readiness.json"
+    report = materialize_collection(ledger, features, readiness)
+    frame = pd.read_parquet(features)
+
+    assert "y" not in frame.columns
+    assert frame["time_to_tca"].ge(2.0).all()
+    assert report["collection"]["batches"] == 1
+    assert len(report["collection"]["source_sha256s"]) == 1
+    assert len(report["collection"]["ledger_sha256"]) == 64
+    assert report["features_sha256"] == __import__("hashlib").sha256(features.read_bytes()).hexdigest()
+
+
+def test_external_collection_close_is_one_shot_and_blocks_append(tmp_path):
+    source = write_external_export(tmp_path / "source.json", [
+        external_cdm_record("early", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z", 1e-8),
+        external_cdm_record("late", "2026-01-06T12:00:00Z", "2026-01-07T00:10:00Z", 2e-5),
+    ])
+    ledger = tmp_path / "collection.json"
+    batches = tmp_path / "batches"
+    append_export(source, ledger, batches, collection_start_utc="2026-01-01T00:00:00Z", collection_end_utc="2026-02-01T00:00:00Z")
+    labels = tmp_path / "labels.parquet"
+    result = close_collection(ledger, labels)
+
+    assert result["status"] == "closed"
+    assert result["positive_events"] == 1
+    assert pd.read_parquet(labels)["y"].tolist() == [1]
+    with np.testing.assert_raises(ValueError):
+        close_collection(ledger, tmp_path / "other-labels.parquet")
+    next_source = write_external_export(tmp_path / "next.json", [
+        external_cdm_record("m3", "2026-01-03T00:00:00Z", "2026-01-07T00:20:00Z")
+    ])
+    with np.testing.assert_raises(ValueError):
+        append_export(next_source, ledger, batches, collection_start_utc="2026-01-01T00:00:00Z", collection_end_utc="2026-02-01T00:00:00Z")
+
+
+def test_external_collection_locks_tca_tolerance(tmp_path):
+    source = write_external_export(tmp_path / "source.json", [
+        external_cdm_record("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z")
+    ])
+    ledger = tmp_path / "collection.json"
+    batches = tmp_path / "batches"
+    append_export(source, ledger, batches, collection_start_utc="2026-01-01T00:00:00Z", collection_end_utc="2026-02-01T00:00:00Z", tca_tolerance_minutes=30)
+    second = write_external_export(tmp_path / "second.json", [
+        external_cdm_record("m2", "2026-01-02T00:00:00Z", "2026-01-07T00:10:00Z")
+    ])
+    with np.testing.assert_raises(ValueError):
+        append_export(second, ledger, batches, collection_start_utc="2026-01-01T00:00:00Z", collection_end_utc="2026-02-01T00:00:00Z", tca_tolerance_minutes=60)
+
+
+def test_external_collection_records_and_locks_collection_period(tmp_path):
+    source = write_external_export(tmp_path / "source.json", [
+        external_cdm_record("m1", "2026-01-05T00:00:00Z", "2026-01-10T00:00:00Z")
+    ])
+    ledger = tmp_path / "collection.json"
+    batches = tmp_path / "batches"
+    result = append_export(
+        source, ledger, batches,
+        collection_start_utc="2026-01-01T00:00:00Z",
+        collection_end_utc="2026-02-01T00:00:00Z",
+    )
+    assert result["collection_period"] == {
+        "start_utc": "2026-01-01T00:00:00+00:00",
+        "end_utc": "2026-02-01T00:00:00+00:00",
+    }
+    second = write_external_export(tmp_path / "second.json", [
+        external_cdm_record("m2", "2026-01-06T00:00:00Z", "2026-01-10T00:10:00Z")
+    ])
+    with np.testing.assert_raises(ValueError):
+        append_export(
+            second, ledger, batches,
+            collection_start_utc="2026-01-02T00:00:00Z",
+            collection_end_utc="2026-02-01T00:00:00Z",
+        )
+
+
+def test_external_collection_rejects_messages_outside_frozen_period(tmp_path):
+    source = write_external_export(tmp_path / "source.json", [
+        external_cdm_record("m1", "2025-12-31T23:00:00Z", "2026-01-07T00:00:00Z")
+    ])
+    ledger = tmp_path / "collection.json"
+    with np.testing.assert_raises(ValueError):
+        append_export(
+            source, ledger, tmp_path / "batches",
+            collection_start_utc="2026-01-01T00:00:00Z",
+            collection_end_utc="2026-02-01T00:00:00Z",
+        )
+    assert not ledger.exists()
+    assert not (tmp_path / "batches").exists()
 
 
 def test_prefix_features_do_not_use_future_rows():
