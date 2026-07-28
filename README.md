@@ -96,6 +96,34 @@ The command writes `replay-audit.parquet`, `runtime-state.json`, `operator-conso
 
 The partition command reproduces the frozen 60/20/20 event split and keeps complete calibration/evaluation label rosters, including events with no CDM in the decision window. The training command scores evaluation features without loading their outcomes. The confirmation command creates an exclusive lock before loading event-level labels, rejects calibration/evaluation event overlap, verifies the frozen policy, and records input checksums. Keep the lock and result under version control after the first confirmatory run.
 
+## External CDM collection
+
+The frozen v13 candidate still requires genuinely new sequential CDM events. The repository now accepts an **offline** flattened JSON export using Space-Track/TraCSS-style field names and audits whether that collection can enter the preregistered study:
+
+```bash
+python scripts/audit_external_cdms.py \
+  --input data/external/cdm-export.json \
+  --features-output data/new/candidate_features.parquet \
+  --readiness-output data/new/candidate_readiness.json
+```
+
+The adapter groups messages by the unordered object pair and nearby TCA, converts collision probability to `log10(Pc)`, maps state-quality and covariance fields to the frozen ESA-compatible feature contract, computes covariance determinants and Mahalanobis distance when possible, and reports feature missingness, sequential-history eligibility, provisional positive counts, and the shortfall against the 100/200-positive planning targets. Event grouping remains subject to manual ambiguity review.
+
+Outcome-blind feature export keeps only CDMs at least two days before TCA. Labels cannot be written unless collection completion is explicitly attested:
+
+```bash
+python scripts/audit_external_cdms.py \
+  --input data/external/complete-cdm-export.json \
+  --features-output data/new/features.parquet \
+  --readiness-output data/new/readiness.json \
+  --labels-output data/new/labels.parquet \
+  --collection-complete
+```
+
+The script does not download protected data, store credentials, or assert redistribution rights. Space-Track's public CDM query currently requires authentication. The 2026 TraCSS Conjunction Assessment Verification Dataset is CC0 and useful for screening-geometry diagnostics, but its answer keys contain conjunction snapshots rather than repeated 2–7 day CDM histories; it cannot by itself confirm the sequential v13 policy. Sources: [Space-Track CDM documentation](https://www.space-track.org/documentation), [TraCSS verification dataset](https://space.commerce.gov/dataset-for-conjunction-assessment-verification/), and the [TraCSS test-set user guide](https://space.commerce.gov/wp-content/uploads/2026/03/Conjunction_Screening_Testset_Users_Guide.pdf).
+
+This ingestion path makes prospective collection executable. It does not create independent evidence by itself. Confirmation remains blocked until enough genuinely new, disjoint, exchangeability-justified event sequences have been collected and frozen before outcomes are opened.
+
 ## Data
 ESA Collision Avoidance Challenge, DOI: 10.5281/zenodo.4463683, CC BY 4.0. Raw data are not redistributed in this repository.
 

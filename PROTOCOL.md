@@ -34,6 +34,12 @@ The frozen policy was calibrated on 73 positive calibration events. PAC rank = 3
 
 The single locked evaluation run produced 4 dangerous exclusions among 73 positive events: observed rate 5.48%, one-sided 95% Clopper-Pearson upper bound 12.10%. The policy assigned SAFE-EXCLUDE to 1,807 of 2,558 negative events (70.64%); median first decision time was 5.53 days before TCA. The pre-specified criterion requiring the evaluation upper bound to be no greater than 10% was not met. No second confirmatory run is permitted.
 
+## External-data acquisition boundary
+
+New external CDMs must be collected independently of the ESA development data and normalized without opening terminal outcomes. The current offline adapter accepts flattened Space-Track/TraCSS-style JSON, but event identity is reconstructed from the object pair and clustered TCA and therefore requires manual ambiguity review. Feature compatibility with the frozen model does not establish event-level exchangeability.
+
+The outcome-blind feature cohort contains only messages with at least two days to TCA. Event labels may be derived from the terminal finite `Pc` only after the collector explicitly attests that the observation window is complete. Readiness counts produced before that attestation are provisional and cannot be reported as confirmation results. The TraCSS Conjunction Assessment Verification Dataset is permitted for geometry and parser diagnostics, not as sequential confirmation evidence, because it supplies answer-key conjunction snapshots rather than repeated message histories.
+
 ## Revised candidate for a genuinely new study
 Development tuning closed after the v11 calibration-stability diagnostic. The revised candidate is frozen in `artifacts/next_validation_preregistration_v12.json`; its lock must not be replaced or deleted. This candidate is post-confirmation development and has no valid claim on `confirmation_v1`, which is previously unblinded historical evidence.
 

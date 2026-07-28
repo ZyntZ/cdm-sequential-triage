@@ -12,6 +12,10 @@ from event_aligned_diagnostics import attach_event_folds
 from event_aligned_model import (
     fit_dynamic_model, positive_tail_weights, prepare_dynamic_frame, score_dynamic_frame,
 )
+from external_cdm import (
+    adapt_external_cdms, derive_event_labels, outcome_blind_features,
+    parse_cdm_json, readiness_report,
+)
 from event_aligned_robustness import (
     attach_candidate_scores, event_groups, paired_subgroup_table,
 )
@@ -31,6 +35,7 @@ from operator_dashboard import build_dashboard, current_events, load_audits
 from evidence_dashboard import build_evidence_dashboard
 from run_demo import run_demo
 from confirm_policy import calibration_command, confirmation_command
+from audit_external_cdms import audit_external_export
 from validation_plan import (
     evaluation_planning_table, maximum_passing_failures,
     minimum_positive_events, pass_probability,
@@ -68,6 +73,167 @@ def sample():
         "mahalanobis_distance":[5.,4.,3.,7.,6.],
         "y":[1,1,1,0,0]
     })
+
+
+def external_cdm_record(message_id, creation_date, tca, probability=1e-7):
+    return {
+        "CDM_ID": message_id,
+        "MESSAGE_ID": message_id,
+        "CREATION_DATE": creation_date,
+        "TCA": tca,
+        "MISS_DISTANCE": "1200",
+        "MISS_DISTANCE_UNIT": "m",
+        "RELATIVE_SPEED": "10123",
+        "RELATIVE_SPEED_UNIT": "m/s",
+        "COLLISION_PROBABILITY": str(probability),
+        "COLLISION_MAX_PROBABILITY": str(probability * 2),
+        "COLLISION_MAX_PC_SCALE_FACTOR": "1.4",
+        "SAT1_OBJECT_DESIGNATOR": "25544",
+        "SAT2_OBJECT_DESIGNATOR": "90001",
+        "SAT2_OBJECT_TYPE": "DEBRIS",
+        "SAT1_OBS_AVAILABLE": "120",
+        "SAT1_OBS_USED": "118",
+        "SAT1_WEIGHTED_RMS": "0.8",
+        "SAT2_OBS_AVAILABLE": "80",
+        "SAT2_OBS_USED": "75",
+        "SAT2_WEIGHTED_RMS": "1.1",
+        "RELATIVE_POSITION_R": "100",
+        "RELATIVE_POSITION_T": "200",
+        "RELATIVE_POSITION_N": "50",
+        "SAT1_CR_R": "100", "SAT1_CT_R": "5", "SAT1_CT_T": "120",
+        "SAT1_CN_R": "2", "SAT1_CN_T": "3", "SAT1_CN_N": "80",
+        "SAT2_CR_R": "90", "SAT2_CT_R": "4", "SAT2_CT_T": "110",
+        "SAT2_CN_R": "1", "SAT2_CN_T": "2", "SAT2_CN_N": "70",
+    }
+
+
+def test_external_cdm_adapter_builds_causal_v13_feature_rows():
+    records = [
+        external_cdm_record("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"),
+        external_cdm_record("m2", "2026-01-02T00:00:00Z", "2026-01-07T00:10:00Z", 2e-7),
+        external_cdm_record("m3", "2026-01-03T00:00:00Z", "2026-01-07T00:20:00Z", 3e-6),
+    ]
+    frame = adapt_external_cdms(records, tca_tolerance_minutes=30)
+
+    assert frame["event_id"].nunique() == 1
+    assert frame["source_message_id"].tolist() == ["m1", "m2", "m3"]
+    assert np.allclose(frame["time_to_tca"], [6.0, 5 + 10/1440, 4 + 20/1440])
+    assert np.isfinite(frame["mahalanobis_distance"]).all()
+    assert (frame["t_position_covariance_det"] > 0).all()
+    assert (frame["c_position_covariance_det"] > 0).all()
+    assert frame["mission_id"].eq("25544").all()
+    prepared = prepare_dynamic_frame(frame, require_labels=False)
+    assert len(prepared) == 3
+    assert prepared["eligible_history_count"].tolist() == [1, 2, 3]
+
+
+def test_external_cdm_event_grouping_splits_distant_tcas():
+    records = [
+        external_cdm_record("near", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"),
+        external_cdm_record("far", "2026-01-01T00:00:00Z", "2026-01-07T02:00:00Z"),
+    ]
+    frame = adapt_external_cdms(records, tca_tolerance_minutes=30)
+    assert frame["event_id"].nunique() == 2
+
+
+def test_external_cdm_features_and_labels_are_separated():
+    records = [
+        external_cdm_record("early", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z", 1e-8),
+        external_cdm_record("late", "2026-01-06T12:00:00Z", "2026-01-07T00:10:00Z", 2e-5),
+    ]
+    frame = adapt_external_cdms(records, tca_tolerance_minutes=30)
+    features = outcome_blind_features(frame, min_days=2.0)
+    assert features["source_message_id"].tolist() == ["early"]
+    with np.testing.assert_raises(ValueError):
+        derive_event_labels(frame)
+    labels = derive_event_labels(frame, collection_complete=True)
+    assert labels["y"].tolist() == [1]
+
+
+def test_external_cdm_readiness_reports_sequential_and_positive_shortfall():
+    records = [
+        external_cdm_record("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z", 1e-7),
+        external_cdm_record("m2", "2026-01-02T00:00:00Z", "2026-01-07T00:10:00Z", 2e-7),
+        external_cdm_record("m3", "2026-01-03T00:00:00Z", "2026-01-07T00:20:00Z", 2e-5),
+    ]
+    report = readiness_report(adapt_external_cdms(records))
+    assert report["events"] == 1
+    assert report["events_eligible_minimum_history"] == 1
+    assert report["provisional_positive_events"] == 1
+    assert report["provisional_total_positive_target_met"] is False
+    assert report["scientific_status"] == "candidate-collection-only"
+    assert len(report["limitations"]) == 3
+
+
+def test_external_cdm_parser_accepts_array_and_ndjson():
+    first = external_cdm_record("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z")
+    second = external_cdm_record("m2", "2026-01-02T00:00:00Z", "2026-01-07T00:10:00Z")
+    assert len(parse_cdm_json(json.dumps([first, second]))) == 2
+    assert len(parse_cdm_json(json.dumps(first) + "\n" + json.dumps(second))) == 2
+
+
+def test_external_cdm_adapter_rejects_duplicates_and_wrong_units():
+    record = external_cdm_record("same", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z")
+    with np.testing.assert_raises(ValueError):
+        adapt_external_cdms([record, record])
+    wrong = dict(record, MESSAGE_ID="other", MISS_DISTANCE_UNIT="km")
+    with np.testing.assert_raises(ValueError):
+        adapt_external_cdms([wrong])
+
+
+def test_external_cdm_audit_cli_writes_outcome_blind_features(tmp_path):
+    source = tmp_path / "external.json"
+    records = [
+        external_cdm_record("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"),
+        external_cdm_record("m2", "2026-01-02T00:00:00Z", "2026-01-07T00:10:00Z"),
+        external_cdm_record("m3", "2026-01-03T00:00:00Z", "2026-01-07T00:20:00Z", 2e-5),
+    ]
+    source.write_text(json.dumps(records), encoding="utf-8")
+    features = tmp_path / "features.parquet"
+    readiness = tmp_path / "readiness.json"
+
+    report = audit_external_export(source, features, readiness)
+
+    stored = pd.read_parquet(features)
+    assert "y" not in stored.columns
+    assert stored["time_to_tca"].ge(2.0).all()
+    assert report["events_eligible_minimum_history"] == 1
+    assert report["labels_written"] == 0
+    assert json.loads(readiness.read_text(encoding="utf-8"))["source"]["messages"] == 3
+
+
+def test_external_cdm_audit_requires_collection_complete_for_labels(tmp_path):
+    source = tmp_path / "external.json"
+    source.write_text(json.dumps([
+        external_cdm_record("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z")
+    ]), encoding="utf-8")
+    with np.testing.assert_raises(ValueError):
+        audit_external_export(
+            source,
+            tmp_path / "features.parquet",
+            tmp_path / "readiness.json",
+            labels_output=tmp_path / "labels.parquet",
+        )
+    assert not list(tmp_path.glob("*.parquet"))
+    assert not (tmp_path / "readiness.json").exists()
+
+
+def test_external_cdm_audit_writes_labels_after_completion_attestation(tmp_path):
+    source = tmp_path / "external.json"
+    source.write_text(json.dumps([
+        external_cdm_record("early", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z", 1e-8),
+        external_cdm_record("late", "2026-01-06T12:00:00Z", "2026-01-07T00:10:00Z", 2e-5),
+    ]), encoding="utf-8")
+    labels = tmp_path / "labels.parquet"
+    report = audit_external_export(
+        source,
+        tmp_path / "features.parquet",
+        tmp_path / "readiness.json",
+        labels_output=labels,
+        collection_complete=True,
+    )
+    assert report["labels_written"] == 1
+    assert pd.read_parquet(labels)["y"].tolist() == [1]
 
 
 def test_prefix_features_do_not_use_future_rows():
