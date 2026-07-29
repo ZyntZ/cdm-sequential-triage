@@ -9,13 +9,13 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from operator_dashboard import build_dashboard
 from evidence_dashboard import build_evidence_dashboard
 from replay_scores import run_replay
 
-sys.path.insert(0, str(ROOT / "src"))
 from confirmation import file_sha256
 
 

@@ -51,16 +51,26 @@ The preregistered score model is now trained on the full development partition a
 
 ## Quick historical demo
 
-Build the locked `confirmation_v1` replay audit and self-contained operator console with one command:
+Install the tested dependency set in a fresh virtual environment:
 
 ```bash
-python scripts/run_demo.py --output-dir /tmp/cdm-sequential-triage-demo
+python -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
-For the Russian competition-facing interface:
+On Windows, use `.venv\Scripts\python` instead of `.venv/bin/python`.
+The historical demo and the complete test suite use the immutable artifacts already stored in this repository; downloading the raw ESA archive is not required for either command.
+
+Build the locked `confirmation_v1` replay audit and self-contained operator console with one command. Omitting `--output-dir` uses the platform temporary directory:
 
 ```bash
-python scripts/run_demo.py --output-dir /tmp/cdm-sequential-triage-demo-ru --locale ru
+.venv/bin/python scripts/run_demo.py
+```
+
+For the Russian competition-facing interface, choose any fresh output directory:
+
+```bash
+.venv/bin/python scripts/run_demo.py --output-dir cdm-demo-ru --locale ru
 ```
 
 The command writes `replay-audit.parquet`, `runtime-state.json`, `operator-console.html`, `evidence-dashboard.html`, and `summary.json` into a fresh output directory outside source and artifact folders. The operator console opens with the highest-priority displayed event selected deterministically and includes a print layout focused on its decision timeline for an offline jury demonstration. `summary.json` records SHA-256 digests for every executable demo artifact, and the command verifies the published bundle after its atomic directory commit. The same check is available programmatically as `verify_demo_bundle(output_dir)`; any missing, added-to-roster, or modified artifact is rejected. The optional `--locale ru` switch renders both HTML dashboards in Russian while preserving decision codes, artifact hashes, numerical results, and the separation between development, confirmation, and preregistered evidence. The evidence dashboard keeps exploratory development results, the locked confirmation_v1 result, and the preregistered v13 study in separate, color-coded tiers and verifies their SHA-256 links before rendering. Its development tier includes a self-contained safety–automation frontier and an outer-fold stability panel: Pareto-efficient methods, the 10% UCB criterion, the selected candidate's paired coverage gain, and the negative fold results are visible without external plotting libraries or network assets. It refuses non-empty or protected destinations and removes staged output if either replay or dashboard generation fails. The demo is label-blind historical runtime evidence only: `confirmation_v1` did not meet its pre-specified 10% UCB criterion and does not validate the v13 candidate.
@@ -92,7 +102,7 @@ The command writes `replay-audit.parquet`, `runtime-state.json`, `operator-conso
 - Frozen calibration: `python scripts/confirm_policy.py calibrate --scores artifacts/new_calibration_scores.parquet --labels data/new/calibration_labels.parquet --model-manifest artifacts/catboost_tail_aligned_final_v13.json --study-manifest artifacts/new_study.json --study-lock artifacts/new_study.lock --output calibration.json [--gate artifacts/shift_gate.json]`. The artifact stores both the declared calibration event roster and its canonical SHA-256 digest. Confirmation recomputes this digest and rejects a missing, duplicated, or modified roster before evaluating event overlap or outcomes.
 - One-shot confirmation: `python scripts/confirm_policy.py confirm --scores artifacts/new_evaluation_scores.parquet --labels data/new/evaluation_labels.parquet --model-manifest artifacts/catboost_tail_aligned_final_v13.json --study-manifest artifacts/new_study.json --study-lock artifacts/new_study.lock --calibration calibration.json --output confirmation.json --lock confirmation.lock [--gate artifacts/shift_gate.json]`. Before creating the irreversible confirmation lock, the command performs a label-blind preflight over the evaluation scores, frozen-study binding, calibration/model/gate identities, required columns, model hash, duplicate updates, and calibration/evaluation event overlap. Invalid label-blind inputs therefore do not consume the one permitted confirmation run. Label-roster validation remains after lock acquisition because it accesses evaluation outcomes.
 - Subgroup diagnostics: `python scripts/robustness_diagnostics.py --group mission_id --output reports/mission.csv`
-- Tests: `pytest -q`
+- Tests: `.venv/bin/python -m pytest -q`
 
 The partition command reproduces the frozen 60/20/20 event split and keeps complete calibration/evaluation label rosters, including events with no CDM in the decision window. The training command scores evaluation features without loading their outcomes. The confirmation command creates an exclusive lock before loading event-level labels, rejects calibration/evaluation event overlap, verifies the frozen policy, and records input checksums. Keep the lock and result under version control after the first confirmatory run.
 

@@ -3184,6 +3184,31 @@ def test_operator_dashboard_refuses_overwrite(tmp_path):
     assert output.read_text(encoding="utf-8") == "sentinel"
 
 
+def test_delivery_requirements_are_exactly_pinned():
+    root = Path(__file__).resolve().parents[1]
+    requirements = (root / "requirements.txt").read_text(encoding="utf-8").splitlines()
+    expected = {
+        "pandas", "numpy", "scipy", "scikit-learn",
+        "catboost", "pyarrow", "pytest",
+    }
+    parsed = {}
+    for line in requirements:
+        name, separator, version = line.partition("==")
+        assert separator == "==" and name and version
+        parsed[name] = version
+    assert set(parsed) == expected
+
+
+def test_run_demo_initializes_local_import_paths_before_imports():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "scripts" / "run_demo.py").read_text(encoding="utf-8")
+    src_path = 'sys.path.insert(0, str(ROOT / "src"))'
+    scripts_path = 'sys.path.insert(0, str(ROOT / "scripts"))'
+    first_local_import = "from operator_dashboard import build_dashboard"
+    assert source.index(src_path) < source.index(first_local_import)
+    assert source.index(scripts_path) < source.index(first_local_import)
+
+
 def test_one_command_demo_builds_verified_outputs(tmp_path):
     root = Path(__file__).resolve().parents[1]
     output = tmp_path / "historical-demo"
