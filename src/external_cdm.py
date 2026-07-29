@@ -279,6 +279,95 @@ def derive_event_labels(
         y=(risk >= threshold_log10_pc).astype(int).to_numpy()
     )
 
+
+def event_grouping_review(
+    frame: pd.DataFrame,
+    *,
+    tca_tolerance_minutes: int = 30,
+) -> dict[str, Any]:
+    """Identify event clusters that need manual review before a study is frozen.
+
+    Public CDM exports do not provide one universal conjunction-event identifier.
+    The adapter therefore groups by object pair and TCA proximity. This diagnostic
+    makes the remaining ambiguity explicit instead of reporting a blanket warning.
+    """
+    required = {"event_id", "event_pair", "tca"}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"Missing event-grouping columns: {sorted(missing)}")
+    if tca_tolerance_minutes < 1:
+        raise ValueError("tca_tolerance_minutes must be positive")
+    tolerance = pd.Timedelta(minutes=tca_tolerance_minutes)
+    clusters = []
+    for (pair, event_id), event in frame.groupby(["event_pair", "event_id"], sort=True):
+        tca = pd.to_datetime(event["tca"], utc=True, errors="coerce")
+        if tca.isna().any():
+            raise ValueError(f"Event {event_id!r} contains an invalid TCA")
+        clusters.append({
+            "event_pair": str(pair),
+            "event_id": str(event_id),
+            "messages": int(len(event)),
+            "tca_min": tca.min(),
+            "tca_max": tca.max(),
+        })
+
+    flagged: dict[str, dict[str, Any]] = {}
+    for cluster in clusters:
+        span = cluster["tca_max"] - cluster["tca_min"]
+        if span > tolerance:
+            flagged[cluster["event_id"]] = {
+                "event_id": cluster["event_id"],
+                "event_pair": cluster["event_pair"],
+                "messages": cluster["messages"],
+                "tca_span_minutes": span.total_seconds() / 60.0,
+                "nearest_other_event_gap_minutes": None,
+                "reasons": ["within_event_tca_span_exceeds_grouping_tolerance"],
+            }
+
+    for pair in sorted({cluster["event_pair"] for cluster in clusters}):
+        same_pair = sorted(
+            (cluster for cluster in clusters if cluster["event_pair"] == pair),
+            key=lambda cluster: (cluster["tca_min"], cluster["event_id"]),
+        )
+        for left, right in zip(same_pair, same_pair[1:]):
+            gap = max(pd.Timedelta(0), right["tca_min"] - left["tca_max"])
+            if gap <= tolerance:
+                gap_minutes = gap.total_seconds() / 60.0
+                for cluster in (left, right):
+                    item = flagged.setdefault(cluster["event_id"], {
+                        "event_id": cluster["event_id"],
+                        "event_pair": cluster["event_pair"],
+                        "messages": cluster["messages"],
+                        "tca_span_minutes": (
+                            cluster["tca_max"] - cluster["tca_min"]
+                        ).total_seconds() / 60.0,
+                        "nearest_other_event_gap_minutes": None,
+                        "reasons": [],
+                    })
+                    previous = item["nearest_other_event_gap_minutes"]
+                    if previous is None or gap_minutes < previous:
+                        item["nearest_other_event_gap_minutes"] = gap_minutes
+                    if "neighboring_same_pair_event_within_tolerance" not in item["reasons"]:
+                        item["reasons"].append(
+                            "neighboring_same_pair_event_within_tolerance"
+                        )
+
+    flagged_events = sorted(flagged.values(), key=lambda item: item["event_id"])
+    repeated_pairs = sum(
+        len({cluster["event_id"] for cluster in clusters if cluster["event_pair"] == pair}) > 1
+        for pair in {cluster["event_pair"] for cluster in clusters}
+    )
+    return {
+        "method": "object pair plus sequential TCA clustering",
+        "tca_tolerance_minutes": int(tca_tolerance_minutes),
+        "events_reviewed": len(clusters),
+        "object_pairs": len({cluster["event_pair"] for cluster in clusters}),
+        "object_pairs_with_multiple_events": int(repeated_pairs),
+        "flagged_events": len(flagged_events),
+        "manual_review_required": bool(flagged_events),
+        "flags": flagged_events,
+    }
+
 def readiness_report(
     frame: pd.DataFrame,
     *,
@@ -304,6 +393,7 @@ def readiness_report(
         column: float(frame[column].isna().mean())
         for column in REQUIRED_EXTERNAL_FEATURES
     }
+    grouping = event_grouping_review(frame)
     return {
         "rows": int(len(frame)),
         "events": len(all_ids),
@@ -318,16 +408,23 @@ def readiness_report(
         "provisional_total_positive_target_met": positive >= 300,
         "feature_missing_fraction": missingness,
         "complete_feature_rows": int(frame[list(REQUIRED_EXTERNAL_FEATURES)].notna().all(axis=1).sum()),
-        "event_grouping": {
-            "method": "object pair plus sequential TCA clustering",
-            "requires_manual_ambiguity_review": True,
-        },
+        "event_grouping": grouping,
         "scientific_status": (
-            "candidate-collection-only" if len(eligible_ids) > 0 else "insufficient-sequential-history"
+            "manual-event-grouping-review-required"
+            if grouping["manual_review_required"]
+            else (
+                "candidate-collection-only"
+                if len(eligible_ids) > 0
+                else "insufficient-sequential-history"
+            )
         ),
         "limitations": [
             "terminal Pc labels are provisional until collection completeness is attested",
             "source-to-ESA feature compatibility does not establish exchangeability",
-            "event grouping requires manual ambiguity review",
+            (
+                "flagged event groups require manual review before study freeze"
+                if grouping["manual_review_required"]
+                else "automated grouping checks cannot exclude all event-identity errors"
+            ),
         ],
     }

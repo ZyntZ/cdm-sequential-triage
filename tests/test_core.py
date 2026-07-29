@@ -13,8 +13,8 @@ from event_aligned_model import (
     fit_dynamic_model, positive_tail_weights, prepare_dynamic_frame, score_dynamic_frame,
 )
 from external_cdm import (
-    adapt_external_cdms, derive_event_labels, outcome_blind_features,
-    parse_cdm_json, readiness_report,
+    adapt_external_cdms, derive_event_labels, event_grouping_review,
+    outcome_blind_features, parse_cdm_json, readiness_report,
 )
 from event_aligned_robustness import (
     attach_candidate_scores, event_groups, paired_subgroup_table,
@@ -138,6 +138,39 @@ def test_external_cdm_event_grouping_splits_distant_tcas():
     ]
     frame = adapt_external_cdms(records, tca_tolerance_minutes=30)
     assert frame["event_id"].nunique() == 2
+
+
+def test_event_grouping_review_flags_chained_tca_drift():
+    records = [
+        external_cdm_record("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"),
+        external_cdm_record("m2", "2026-01-01T01:00:00Z", "2026-01-07T00:20:00Z"),
+        external_cdm_record("m3", "2026-01-01T02:00:00Z", "2026-01-07T00:40:00Z"),
+    ]
+    frame = adapt_external_cdms(records, tca_tolerance_minutes=30)
+
+    review = event_grouping_review(frame, tca_tolerance_minutes=30)
+
+    assert frame["event_id"].nunique() == 1
+    assert review["manual_review_required"] is True
+    assert review["flagged_events"] == 1
+    assert review["flags"][0]["tca_span_minutes"] == 40.0
+    assert review["flags"][0]["reasons"] == [
+        "within_event_tca_span_exceeds_grouping_tolerance"
+    ]
+    report = readiness_report(frame)
+    assert report["scientific_status"] == "manual-event-grouping-review-required"
+
+
+def test_event_grouping_review_clears_compact_cluster():
+    records = [
+        external_cdm_record("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"),
+        external_cdm_record("m2", "2026-01-02T00:00:00Z", "2026-01-07T00:10:00Z"),
+        external_cdm_record("m3", "2026-01-03T00:00:00Z", "2026-01-07T00:20:00Z"),
+    ]
+    review = event_grouping_review(adapt_external_cdms(records))
+    assert review["manual_review_required"] is False
+    assert review["flagged_events"] == 0
+    assert review["flags"] == []
 
 
 def test_external_cdm_features_and_labels_are_separated():

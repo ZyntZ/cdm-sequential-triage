@@ -107,7 +107,7 @@ python scripts/audit_external_cdms.py \
   --readiness-output data/new/candidate_readiness.json
 ```
 
-The adapter groups messages by the unordered object pair and nearby TCA, converts collision probability to `log10(Pc)`, maps state-quality and covariance fields to the frozen ESA-compatible feature contract, computes covariance determinants and Mahalanobis distance when possible, and reports feature missingness, sequential-history eligibility, provisional positive counts, and the shortfall against the 100/200-positive planning targets. Event grouping remains subject to manual ambiguity review.
+The adapter groups messages by the unordered object pair and nearby TCA, converts collision probability to `log10(Pc)`, maps state-quality and covariance fields to the frozen ESA-compatible feature contract, computes covariance determinants and Mahalanobis distance when possible, and reports feature missingness, sequential-history eligibility, provisional positive counts, and the shortfall against the 100/200-positive planning targets. The readiness report now audits event identity explicitly: it flags chained TCA drift beyond the frozen grouping tolerance and neighboring same-pair clusters that remain too close to distinguish safely. A flagged collection receives `manual-event-grouping-review-required` status, with event IDs, TCA spans, nearest-cluster gaps, and reasons recorded in `event_grouping.flags`. A clean automated check reduces review scope but cannot prove event identity, because public feeds do not expose one universal conjunction-event identifier.
 
 Outcome-blind feature export keeps only CDMs at least two days before TCA. Labels cannot be written unless collection completion is explicitly attested:
 
