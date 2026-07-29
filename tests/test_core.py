@@ -3909,6 +3909,71 @@ def test_restore_rejects_nonmonotone_audit_tca(tmp_path):
         SequentialTriagePolicy.restore(checkpoint)
 
 
+def test_restore_rejects_forged_eligible_history_with_valid_digest(tmp_path):
+    policy = SequentialTriagePolicy(safe_threshold=0.20, minimum_history=3)
+    policy.update("event", 7.0, 0.10)
+    policy.update("event", 6.0, 0.10)
+    checkpoint = tmp_path / "runtime.json"
+    policy.checkpoint(checkpoint)
+
+    def forge_history(payload):
+        payload["audit"][0]["eligible_history_count"] = 0
+
+    _rewrite_checkpoint_with_valid_digest(checkpoint, forge_history)
+    with np.testing.assert_raises_regex(ValueError, "eligible history"):
+        SequentialTriagePolicy.restore(checkpoint)
+
+
+def test_restore_rejects_forged_window_flag_with_valid_digest(tmp_path):
+    policy = SequentialTriagePolicy(safe_threshold=0.20)
+    policy.update("event", 8.0, 0.10)
+    checkpoint = tmp_path / "runtime.json"
+    policy.checkpoint(checkpoint)
+    _rewrite_checkpoint_with_valid_digest(
+        checkpoint,
+        lambda payload: payload["audit"][0].update(
+            {"decision_window_eligible": True}
+        ),
+    )
+
+    with np.testing.assert_raises_regex(ValueError, "decision-window flag"):
+        SequentialTriagePolicy.restore(checkpoint)
+
+
+def test_restore_rejects_forged_decision_reason_with_valid_digest(tmp_path):
+    policy = SequentialTriagePolicy(safe_threshold=0.20, minimum_history=3)
+    policy.update("event", 7.0, 0.10)
+    checkpoint = tmp_path / "runtime.json"
+    policy.checkpoint(checkpoint)
+    _rewrite_checkpoint_with_valid_digest(
+        checkpoint,
+        lambda payload: payload["audit"][0].update({
+            "decision": "SAFE-EXCLUDE",
+            "reason": "score_at_or_below_calibrated_threshold",
+        }),
+    )
+
+    with np.testing.assert_raises_regex(ValueError, "decision or reason"):
+        SequentialTriagePolicy.restore(checkpoint)
+
+
+def test_restore_rejects_shift_gate_fields_without_gate(tmp_path):
+    policy = SequentialTriagePolicy(safe_threshold=0.20)
+    policy.update("event", 7.0, 0.10)
+    checkpoint = tmp_path / "runtime.json"
+    policy.checkpoint(checkpoint)
+    _rewrite_checkpoint_with_valid_digest(
+        checkpoint,
+        lambda payload: payload["audit"][0].update({
+            "shift_score": 3.0,
+            "shift_gate_allowed": False,
+        }),
+    )
+
+    with np.testing.assert_raises_regex(ValueError, "shift-gate fields"):
+        SequentialTriagePolicy.restore(checkpoint)
+
+
 def test_processed_batch_ledger_rejects_calibration_change():
     policy = SequentialTriagePolicy(safe_threshold=0.20)
     policy.update("event", 7.0, 0.10)

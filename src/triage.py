@@ -108,6 +108,30 @@ class SequentialTriagePolicy:
         self._audit: list[TriageDecision] = []
         self._processed_batches: list[ProcessedBatch] = []
 
+    def _decision_for_update(
+        self,
+        *,
+        time_to_tca: float,
+        score: float,
+        eligible_history_count: int,
+        gate_allowed: bool,
+    ) -> tuple[Decision, str]:
+        """Apply the frozen decision order to validated update fields."""
+        if self.escalation_threshold is not None and score >= self.escalation_threshold:
+            return Decision.ESCALATE, "score_at_or_above_escalation_threshold"
+        if time_to_tca > self.max_days_to_tca:
+            return Decision.MONITOR, "decision_window_not_open"
+        if time_to_tca < self.min_days_to_tca:
+            return Decision.MONITOR, "decision_window_closed"
+        if eligible_history_count < self.minimum_history:
+            return Decision.MONITOR, "minimum_history_not_reached"
+        if score <= self.safe_threshold and not gate_allowed:
+            return Decision.MONITOR, "safe_exclude_blocked_by_shift_gate"
+        if score <= self.safe_threshold:
+            return Decision.SAFE_EXCLUDE, "score_at_or_below_calibrated_threshold"
+        return Decision.MONITOR, "score_between_decision_thresholds"
+
+
     def update(
         self,
         event_id: Any,
@@ -143,27 +167,12 @@ class SequentialTriagePolicy:
                 shift_score = float(self.shift_gate.score(frame).iloc[0])
                 gate_allowed = bool(self.shift_gate.allows_safe_exclude(frame).iloc[0])
 
-        if self.escalation_threshold is not None and value >= self.escalation_threshold:
-            decision = Decision.ESCALATE
-            reason = "score_at_or_above_escalation_threshold"
-        elif tca > self.max_days_to_tca:
-            decision = Decision.MONITOR
-            reason = "decision_window_not_open"
-        elif tca < self.min_days_to_tca:
-            decision = Decision.MONITOR
-            reason = "decision_window_closed"
-        elif eligible_history_count < self.minimum_history:
-            decision = Decision.MONITOR
-            reason = "minimum_history_not_reached"
-        elif value <= self.safe_threshold and not gate_allowed:
-            decision = Decision.MONITOR
-            reason = "safe_exclude_blocked_by_shift_gate"
-        elif value <= self.safe_threshold:
-            decision = Decision.SAFE_EXCLUDE
-            reason = "score_at_or_below_calibrated_threshold"
-        else:
-            decision = Decision.MONITOR
-            reason = "score_between_decision_thresholds"
+        decision, reason = self._decision_for_update(
+            time_to_tca=tca,
+            score=value,
+            eligible_history_count=eligible_history_count,
+            gate_allowed=gate_allowed,
+        )
 
         result = TriageDecision(
             event_id=event_id,
@@ -384,7 +393,10 @@ class SequentialTriagePolicy:
             return float("inf")
         if value == "negative_infinity":
             return float("-inf")
-        numeric = float(value)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Checkpoint float encoding is invalid") from error
         if not np.isfinite(numeric):
             raise ValueError("Checkpoint floats must be finite or encoded infinity")
         return numeric
@@ -552,13 +564,36 @@ class SequentialTriagePolicy:
             if previous is None:
                 if decision.sequence_number != 1:
                     raise ValueError("Checkpoint audit must start each event at sequence one")
+                previous_eligible_count = 0
             else:
                 if decision.sequence_number != previous.sequence_number + 1:
                     raise ValueError("Checkpoint audit sequence numbers are not contiguous")
                 if decision.time_to_tca >= previous.time_to_tca:
                     raise ValueError("Checkpoint audit TCA is not strictly decreasing")
-                if decision.eligible_history_count < previous.eligible_history_count:
-                    raise ValueError("Checkpoint eligible history is not monotone")
+                previous_eligible_count = previous.eligible_history_count
+            expected_window_eligible = (
+                policy.min_days_to_tca
+                <= decision.time_to_tca
+                <= policy.max_days_to_tca
+            )
+            expected_eligible_count = previous_eligible_count + int(
+                expected_window_eligible
+            )
+            if decision.decision_window_eligible != expected_window_eligible:
+                raise ValueError("Checkpoint decision-window flag is inconsistent")
+            if decision.eligible_history_count != expected_eligible_count:
+                raise ValueError("Checkpoint eligible history is inconsistent")
+            if policy.shift_gate is None:
+                if decision.shift_score is not None or not decision.shift_gate_allowed:
+                    raise ValueError("Checkpoint shift-gate fields are inconsistent")
+            expected_decision, expected_reason = policy._decision_for_update(
+                time_to_tca=decision.time_to_tca,
+                score=decision.score,
+                eligible_history_count=decision.eligible_history_count,
+                gate_allowed=decision.shift_gate_allowed,
+            )
+            if decision.decision != expected_decision or decision.reason != expected_reason:
+                raise ValueError("Checkpoint decision or reason is inconsistent")
             audit_tails[decision.event_id] = decision
         if set(audit_tails) != set(policy._counts):
             raise ValueError("Checkpoint state and audit event rosters differ")
