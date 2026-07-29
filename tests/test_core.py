@@ -2878,6 +2878,55 @@ def test_operator_dashboard_builds_self_contained_html(tmp_path):
     assert "https://" not in document
 
 
+def test_operator_dashboard_showcase_follows_current_event_priority(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(
+        json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n"
+    )
+    audit = pd.concat([
+        dashboard_audit_frame(
+            calibration, event_id="safe-event", decision="SAFE-EXCLUDE"
+        ),
+        dashboard_audit_frame(
+            calibration, event_id="monitor-event", decision="MONITOR"
+        ),
+        dashboard_audit_frame(
+            calibration, event_id="escalate-event", decision="ESCALATE"
+        ),
+    ], ignore_index=True)
+    audit_path = tmp_path / "audit.parquet"
+    audit.to_parquet(audit_path, index=False)
+    output = tmp_path / "dashboard.html"
+
+    build_dashboard([audit_path], calibration, output)
+    document = output.read_text(encoding="utf-8")
+
+    timeline = document.split("const events=", 1)[1].split(
+        ";const select=", 1
+    )[0]
+    assert timeline.index('"label": "escalate-event"') < timeline.index(
+        '"label": "monitor-event"'
+    ) < timeline.index('"label": "safe-event"')
+
+
+def test_operator_dashboard_contains_print_layout(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(
+        json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n"
+    )
+    audit_path = tmp_path / "audit.parquet"
+    dashboard_audit_frame(calibration).to_parquet(audit_path, index=False)
+    output = tmp_path / "dashboard.html"
+
+    build_dashboard([audit_path], calibration, output)
+    document = output.read_text(encoding="utf-8")
+
+    assert "@media print" in document
+    assert "select,footer,.active,.lineage{display:none}" in document
+    assert ".timeline{grid-column:span 12}" in document
+    assert "break-inside:avoid" in document
+
+
 def test_operator_dashboard_combines_resumed_batches_by_latest_sequence(tmp_path):
     calibration = tmp_path / "calibration.json"
     calibration.write_text(json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n")
