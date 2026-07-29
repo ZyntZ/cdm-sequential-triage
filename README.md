@@ -49,6 +49,14 @@ Development tuning is closed after v11. The next-study candidate is frozen in `a
 
 The preregistered score model is now trained on the full development partition and stored as `artifacts/catboost_tail_aligned_final_v13.cbm`. Its SHA-256 is `9607c64be397229a9814131d5011e80a7df28d62a51abe514e8b7814e6d67e72`. Fresh five-fold inner-OOF dynamic scores were generated on the development events to define the frozen positive-tail weights before the final fit. The manifest records 66,592 prefixes, 7,146 events, 192 positives, 500 trees, and no calibration or evaluation access. The model has no decision threshold; PAC calibration on genuinely new events is still required.
 
+Check the current v13 validation prerequisites without reading scores, labels, or outcomes:
+
+```bash
+python scripts/collect_external_cdms.py check-v13
+```
+
+The command verifies the preregistration lock, model/preregistration binding, model binary SHA-256, outcome-firewall flags, and frozen new-study requirements. With the repository artifacts alone it reports `ready_for_scientific_confirmation=false` because no real prospective collection ledger and no locked new-study manifest are present. After collection and study freeze, pass `--ledger`, `--study-manifest`, and `--study-lock` to verify those prerequisites as well. The planning targets are 100 positive calibration events and 200 positive evaluation events. The value 89 is not a general minimum: it is the smallest evaluation-positive denominator for which exactly four dangerous exclusions still satisfy the one-sided 95% Clopper–Pearson upper-bound criterion of 10%.
+
 ## Quick historical demo
 
 Install the tested dependency set in a fresh virtual environment:

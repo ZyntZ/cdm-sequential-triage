@@ -40,6 +40,7 @@ from confirm_policy import (
     _confirmation_preflight, calibration_command, confirmation_command,
 )
 from audit_external_cdms import audit_external_export
+from collect_external_cdms import check_v13_readiness
 from external_collection import (
     allocate_prospective_cohort, append_export, close_collection,
     collection_status, materialize_collection, read_collection, seal_collection,
@@ -4097,3 +4098,73 @@ def test_restore_rejects_nonnull_genesis_link(tmp_path):
     )
     with np.testing.assert_raises(ValueError):
         SequentialTriagePolicy.restore(checkpoint)
+
+def test_v13_readiness_verifies_frozen_artifacts_without_outcomes():
+    root = Path(__file__).resolve().parents[1]
+    result = check_v13_readiness(
+        root / "artifacts" / "next_validation_preregistration_v12.json",
+        root / "artifacts" / "next_validation_preregistration_v12.lock",
+        root / "artifacts" / "catboost_tail_aligned_final_v13.json",
+        root / "artifacts" / "catboost_tail_aligned_final_v13.cbm",
+    )
+
+    assert result["candidate"] == "catboost_tail_aligned"
+    assert result["ready_for_scientific_confirmation"] is False
+    assert set(result["missing_prerequisites"]) == {
+        "prospective_collection", "frozen_new_study"
+    }
+    assert result["failed_checks"] == []
+    assert result["collection"] is None
+    assert result["targets"]["recommended_calibration_positive_events"] == 100
+    assert result["targets"]["recommended_evaluation_positive_events"] == 200
+    assert result["targets"]["minimum_evaluation_positive_events_if_four_failures"] == 89
+
+
+def test_v13_readiness_rejects_tampered_model_manifest(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    manifest = json.loads(
+        (root / "artifacts" / "catboost_tail_aligned_final_v13.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    manifest["outputs"]["model"]["sha256"] = "0" * 64
+    manifest_path = tmp_path / "v13.json"
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+    result = check_v13_readiness(
+        root / "artifacts" / "next_validation_preregistration_v12.json",
+        root / "artifacts" / "next_validation_preregistration_v12.lock",
+        manifest_path,
+        root / "artifacts" / "catboost_tail_aligned_final_v13.cbm",
+    )
+
+    assert result["ready_for_scientific_confirmation"] is False
+    assert "model_binary" in result["failed_checks"]
+
+
+def test_v13_readiness_reports_unsealed_collection_as_blocking(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    source = write_external_export(tmp_path / "source.json", [
+        external_cdm_record(
+            "m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"
+        )
+    ])
+    ledger = tmp_path / "collection.json"
+    append_export(
+        source, ledger, tmp_path / "batches",
+        collection_start_utc="2026-01-01T00:00:00Z",
+        collection_end_utc="2026-02-01T00:00:00Z",
+    )
+
+    result = check_v13_readiness(
+        root / "artifacts" / "next_validation_preregistration_v12.json",
+        root / "artifacts" / "next_validation_preregistration_v12.lock",
+        root / "artifacts" / "catboost_tail_aligned_final_v13.json",
+        root / "artifacts" / "catboost_tail_aligned_final_v13.cbm",
+        ledger=ledger,
+    )
+
+    assert "prospective_collection" in result["failed_checks"]
+    assert result["collection"]["status"] == "collecting"
+    assert result["collection"]["outcomes_accessed"] is False
+
