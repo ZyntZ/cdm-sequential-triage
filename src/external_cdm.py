@@ -63,23 +63,101 @@ def _timestamp(value: Any, field: str) -> pd.Timestamp:
     return parsed
 
 
-def parse_cdm_json(source: str | Path | bytes | list[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Load a JSON array or newline-delimited JSON without network access."""
-    if isinstance(source, list):
-        payload = source
-    else:
-        if isinstance(source, bytes):
-            text = source.decode("utf-8")
-        else:
+def _source_text(source: str | Path | bytes) -> str:
+    if isinstance(source, bytes):
+        return source.decode("utf-8-sig")
+    if isinstance(source, Path):
+        return source.read_text(encoding="utf-8-sig")
+    if "\n" not in source and "\r" not in source:
+        try:
             candidate = Path(source)
-            text = candidate.read_text(encoding="utf-8") if candidate.exists() else str(source)
+            if candidate.exists():
+                return candidate.read_text(encoding="utf-8-sig")
+        except OSError:
+            pass
+    return source
+
+
+def _kvn_value(value: str) -> tuple[str, str | None]:
+    """Split a KVN value from its optional trailing unit declaration."""
+    stripped = value.strip()
+    if stripped.endswith("]") and "[" in stripped:
+        plain, unit = stripped.rsplit("[", 1)
+        normalized_unit = unit[:-1].strip()
+        if plain.strip() and normalized_unit:
+            return plain.strip(), normalized_unit
+    return stripped, None
+
+
+def _parse_cdm_kvn(text: str) -> list[dict[str, Any]]:
+    """Parse one or more CCSDS CDM keyword-value notation documents."""
+    documents: list[dict[str, Any]] = []
+    current: dict[str, Any] = {}
+    object_prefix: str | None = None
+
+    def finish() -> None:
+        nonlocal current, object_prefix
+        if current:
+            if "CCSDS_CDM_VERS" not in current:
+                raise ValueError("KVN document has no CCSDS_CDM_VERS field")
+            documents.append(current)
+        current = {}
+        object_prefix = None
+
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("COMMENT") or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise ValueError(f"Invalid KVN line {line_number}: expected KEY = VALUE")
+        raw_key, raw_value = line.split("=", 1)
+        key = _clean_key(raw_key)
+        value, unit = _kvn_value(raw_value)
+        if not key or not value:
+            raise ValueError(f"Invalid KVN line {line_number}: empty key or value")
+        if key == "CCSDS_CDM_VERS" and current:
+            finish()
+        if key == "OBJECT":
+            normalized_object = value.strip().upper().replace("_", "")
+            if normalized_object in {"OBJECT1", "SAT1"}:
+                object_prefix = "SAT1"
+            elif normalized_object in {"OBJECT2", "SAT2"}:
+                object_prefix = "SAT2"
+            else:
+                raise ValueError(
+                    f"Invalid KVN line {line_number}: unsupported OBJECT {value!r}"
+                )
+            continue
+        target_key = f"{object_prefix}_{key}" if object_prefix else key
+        if target_key in current:
+            raise ValueError(f"Duplicate KVN field {target_key!r} on line {line_number}")
+        current[target_key] = value
+        if unit is not None:
+            current[f"{target_key}_UNIT"] = unit
+    finish()
+    if not documents:
+        raise ValueError("CDM KVN input is empty")
+    return documents
+
+
+def parse_cdm_source(
+    source: str | Path | bytes | list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Load JSON, newline-delimited JSON, or CCSDS CDM KVN without network access."""
+    if isinstance(source, list):
+        payload: Any = source
+    else:
+        text = _source_text(source)
         stripped = text.strip()
         if not stripped:
-            raise ValueError("CDM JSON input is empty")
+            raise ValueError("CDM input is empty")
         try:
             payload = json.loads(stripped)
         except json.JSONDecodeError:
-            payload = [json.loads(line) for line in stripped.splitlines() if line.strip()]
+            try:
+                payload = [json.loads(line) for line in stripped.splitlines() if line.strip()]
+            except json.JSONDecodeError:
+                return [_record(item) for item in _parse_cdm_kvn(stripped)]
     if isinstance(payload, dict):
         payload = [payload]
     if not isinstance(payload, list) or not payload:
@@ -87,6 +165,13 @@ def parse_cdm_json(source: str | Path | bytes | list[Mapping[str, Any]]) -> list
     if not all(isinstance(item, Mapping) for item in payload):
         raise ValueError("Every CDM JSON item must be an object")
     return [_record(item) for item in payload]
+
+
+def parse_cdm_json(
+    source: str | Path | bytes | list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Backward-compatible alias for :func:`parse_cdm_source`."""
+    return parse_cdm_source(source)
 
 
 def _object_designator(record: Mapping[str, Any], prefix: str) -> str:

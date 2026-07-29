@@ -1,4 +1,4 @@
-"""Normalize an offline external CDM export and audit prospective-study readiness."""
+"""Normalize an offline JSON or CCSDS KVN CDM export and audit study readiness."""
 from __future__ import annotations
 
 import argparse
@@ -17,7 +17,7 @@ from external_cdm import (
     adapt_external_cdms,
     derive_event_labels,
     outcome_blind_features,
-    parse_cdm_json,
+    parse_cdm_source,
     readiness_report,
 )
 
@@ -77,7 +77,7 @@ def audit_external_export(
     if labels_output is not None and not collection_complete:
         raise ValueError("--labels-output requires --collection-complete")
 
-    records = parse_cdm_json(input_path)
+    records = parse_cdm_source(input_path)
     normalized = adapt_external_cdms(
         records, tca_tolerance_minutes=tca_tolerance_minutes
     )
@@ -113,7 +113,7 @@ def audit_external_export(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Normalize an offline Space-Track/TraCSS-style CDM JSON export"
+        description="Normalize an offline JSON or CCSDS KVN CDM export"
     )
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--features-output", type=Path, required=True)

@@ -14,7 +14,7 @@ from event_aligned_model import (
 )
 from external_cdm import (
     adapt_external_cdms, derive_event_labels, event_grouping_review,
-    outcome_blind_features, parse_cdm_json, readiness_report,
+    outcome_blind_features, parse_cdm_json, parse_cdm_source, readiness_report,
 )
 from event_aligned_robustness import (
     attach_candidate_scores, event_groups, paired_subgroup_table,
@@ -209,6 +209,70 @@ def test_external_cdm_parser_accepts_array_and_ndjson():
     second = external_cdm_record("m2", "2026-01-02T00:00:00Z", "2026-01-07T00:10:00Z")
     assert len(parse_cdm_json(json.dumps([first, second]))) == 2
     assert len(parse_cdm_json(json.dumps(first) + "\n" + json.dumps(second))) == 2
+
+
+def cdm_kvn(message_id, creation_date, tca, probability=1e-7):
+    return f"""CCSDS_CDM_VERS = 1.0
+CREATION_DATE = {creation_date}
+MESSAGE_ID = {message_id}
+TCA = {tca}
+MISS_DISTANCE = 1200 [m]
+RELATIVE_SPEED = 10123 [m/s]
+COLLISION_PROBABILITY = {probability}
+COLLISION_MAX_PROBABILITY = {probability * 2}
+COLLISION_MAX_PC_SCALE_FACTOR = 1.4
+RELATIVE_POSITION_R = 100 [m]
+RELATIVE_POSITION_T = 200 [m]
+RELATIVE_POSITION_N = 50 [m]
+OBJECT = OBJECT1
+OBJECT_DESIGNATOR = 25544
+OBS_AVAILABLE = 120
+OBS_USED = 118
+WEIGHTED_RMS = 0.8
+CR_R = 100
+CT_R = 5
+CT_T = 120
+CN_R = 2
+CN_T = 3
+CN_N = 80
+OBJECT = OBJECT2
+OBJECT_DESIGNATOR = 90001
+OBJECT_TYPE = DEBRIS
+OBS_AVAILABLE = 80
+OBS_USED = 75
+WEIGHTED_RMS = 1.1
+CR_R = 90
+CT_R = 4
+CT_T = 110
+CN_R = 1
+CN_T = 2
+CN_N = 70
+"""
+
+
+def test_external_cdm_parser_accepts_standard_kvn_and_object_sections():
+    records = parse_cdm_source(
+        cdm_kvn("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z")
+        + cdm_kvn("m2", "2026-01-02T00:00:00Z", "2026-01-07T00:10:00Z")
+    )
+    assert len(records) == 2
+    assert records[0]["SAT1_OBJECT_DESIGNATOR"] == "25544"
+    assert records[0]["SAT2_OBJECT_TYPE"] == "DEBRIS"
+    assert records[0]["MISS_DISTANCE_UNIT"] == "m"
+    frame = adapt_external_cdms(records)
+    assert frame["event_id"].nunique() == 1
+    assert frame["source_message_id"].tolist() == ["m1", "m2"]
+    assert np.isfinite(frame["mahalanobis_distance"]).all()
+
+
+def test_external_cdm_parser_rejects_invalid_or_duplicate_kvn_fields():
+    with np.testing.assert_raises(ValueError):
+        parse_cdm_source("CCSDS_CDM_VERS = 1.0\nBROKEN LINE")
+    duplicate = cdm_kvn(
+        "m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"
+    ).replace("TCA = 2026", "TCA = 2026\nTCA = 2026", 1)
+    with np.testing.assert_raises(ValueError):
+        parse_cdm_source(duplicate)
 
 
 def test_external_cdm_adapter_rejects_duplicates_and_wrong_units():

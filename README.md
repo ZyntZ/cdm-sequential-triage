@@ -108,16 +108,16 @@ The partition command reproduces the frozen 60/20/20 event split and keeps compl
 
 ## External CDM collection
 
-The frozen v13 candidate still requires genuinely new sequential CDM events. The repository now accepts an **offline** flattened JSON export using Space-Track/TraCSS-style field names and audits whether that collection can enter the preregistered study:
+The frozen v13 candidate still requires genuinely new sequential CDM events. The repository accepts either an **offline** flattened JSON export using Space-Track/TraCSS-style field names or standard CCSDS CDM keyword-value notation (KVN), including files containing consecutive CDM documents. KVN `OBJECT1` and `OBJECT2` sections are mapped to the frozen `SAT1_*` and `SAT2_*` feature contract; inline units such as `[m]` and `[m/s]` are checked by the same adapter. The audit then determines whether the collection can enter the preregistered study:
 
 ```bash
 python scripts/audit_external_cdms.py \
-  --input data/external/cdm-export.json \
+  --input data/external/cdm-export.kvn \
   --features-output data/new/candidate_features.parquet \
   --readiness-output data/new/candidate_readiness.json
 ```
 
-The adapter groups messages by the unordered object pair and nearby TCA, converts collision probability to `log10(Pc)`, maps state-quality and covariance fields to the frozen ESA-compatible feature contract, computes covariance determinants and Mahalanobis distance when possible, and reports feature missingness, sequential-history eligibility, provisional positive counts, and the shortfall against the 100/200-positive planning targets. The readiness report now audits event identity explicitly: it flags chained TCA drift beyond the frozen grouping tolerance and neighboring same-pair clusters that remain too close to distinguish safely. A flagged collection receives `manual-event-grouping-review-required` status, with event IDs, TCA spans, nearest-cluster gaps, and reasons recorded in `event_grouping.flags`. A clean automated check reduces review scope but cannot prove event identity, because public feeds do not expose one universal conjunction-event identifier.
+The adapter groups messages by the unordered object pair and nearby TCA, converts collision probability to `log10(Pc)`, maps state-quality and covariance fields to the frozen ESA-compatible feature contract, computes covariance determinants and Mahalanobis distance when possible, and reports feature missingness, sequential-history eligibility, provisional positive counts, and the shortfall against the 100/200-positive planning targets. Malformed KVN lines, duplicate fields, unsupported object sections, duplicate message identifiers, and unsupported distance or speed units are rejected before cohort artifacts are written. The readiness report now audits event identity explicitly: it flags chained TCA drift beyond the frozen grouping tolerance and neighboring same-pair clusters that remain too close to distinguish safely. A flagged collection receives `manual-event-grouping-review-required` status, with event IDs, TCA spans, nearest-cluster gaps, and reasons recorded in `event_grouping.flags`. A clean automated check reduces review scope but cannot prove event identity, because public feeds do not expose one universal conjunction-event identifier.
 
 Outcome-blind feature export keeps only CDMs at least two days before TCA. Labels cannot be written unless collection completion is explicitly attested:
 

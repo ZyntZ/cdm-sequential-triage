@@ -16,7 +16,7 @@ from external_cdm import (
     adapt_external_cdms,
     derive_event_labels,
     outcome_blind_features,
-    parse_cdm_json,
+    parse_cdm_source,
     readiness_report,
 )
 from study import file_sha256, read_locked_study
@@ -327,7 +327,7 @@ def append_export(
     if any(batch["source_sha256"] == source_sha256 for batch in ledger["batches"]):
         raise ValueError("Source export has already been appended")
 
-    records = parse_cdm_json(source_path)
+    records = parse_cdm_source(source_path)
     incoming = adapt_external_cdms(records, tca_tolerance_minutes=tca_tolerance_minutes)
     _validate_collection_period(incoming, requested_period)
     existing_by_id = {}
