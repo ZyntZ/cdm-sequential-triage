@@ -143,6 +143,13 @@ python scripts/collect_external_cdms.py append \
   --calibration-fraction 0.3333333333333333
 ```
 
+Track collection progress without opening terminal outcomes. The command verifies the ledger, batch hash chain, immutable batch files, and cohort assignments before reporting message counts, event counts, 2–7 day history eligibility, and separate calibration/evaluation cohort totals:
+
+```bash
+python scripts/collect_external_cdms.py status \
+  --ledger data/new/collection.json
+```
+
 After the predeclared period ends, seal ingestion without deriving labels:
 
 ```bash

@@ -205,6 +205,82 @@ def read_collection(ledger_path: str | Path) -> tuple[dict[str, Any], pd.DataFra
     return ledger, _load_batches(ledger, ledger_path)
 
 
+def collection_status(
+    ledger_path: str | Path,
+    *,
+    minimum_history: int = 3,
+    min_days: float = 2.0,
+    max_days: float = 7.0,
+) -> dict[str, Any]:
+    """Return an integrity-checked, outcome-blind collection progress summary."""
+    if minimum_history < 1:
+        raise ValueError("minimum_history must be at least one")
+    if not np.isfinite(min_days) or not np.isfinite(max_days) or min_days > max_days:
+        raise ValueError("Require finite min_days <= max_days")
+
+    ledger_path = Path(ledger_path)
+    ledger, complete = read_collection(ledger_path)
+    allocation = ledger.get("allocation")
+    assignments = {} if allocation is None else allocation["assignments"]
+    period = ledger.get("collection_period")
+    period_ended = None
+    if period is not None:
+        period_ended = bool(pd.Timestamp.now(tz="UTC") >= pd.Timestamp(period["end_utc"]))
+
+    if complete.empty:
+        history = pd.Series(dtype="int64")
+        feature_events: set[str] = set()
+    else:
+        window = complete.loc[
+            complete["time_to_tca"].between(min_days, max_days, inclusive="both")
+        ]
+        history = window.groupby("event_id").size()
+        feature_events = set(window["event_id"].astype(str))
+    eligible_events = set(history.loc[history >= minimum_history].index.astype(str))
+
+    cohort_rows: dict[str, dict[str, int]] = {}
+    for cohort in ("calibration", "evaluation"):
+        event_ids = {
+            event_id for event_id, assigned in assignments.items()
+            if assigned == cohort
+        }
+        if complete.empty:
+            messages = 0
+        else:
+            messages = int(complete["event_id"].astype(str).isin(event_ids).sum())
+        cohort_rows[cohort] = {
+            "assigned_events": len(event_ids),
+            "messages": messages,
+            "events_in_decision_window": len(event_ids & feature_events),
+            "events_eligible_minimum_history": len(event_ids & eligible_events),
+        }
+
+    return {
+        "schema_version": 1,
+        "status": ledger["status"],
+        "integrity_verified": True,
+        "ledger_sha256": file_sha256(ledger_path),
+        "batch_chain_head": ledger.get("batch_chain_head"),
+        "batches": len(ledger.get("batches", [])),
+        "messages": int(len(complete)),
+        "events": int(complete["event_id"].nunique()) if not complete.empty else 0,
+        "collection_period": period,
+        "collection_period_ended": period_ended,
+        "decision_window_days": {"minimum": float(min_days), "maximum": float(max_days)},
+        "minimum_history": int(minimum_history),
+        "events_in_decision_window": len(feature_events),
+        "events_eligible_minimum_history": len(eligible_events),
+        "allocation": None if allocation is None else {
+            "rule": allocation["rule"],
+            "seed": int(allocation["seed"]),
+            "calibration_fraction": float(allocation["calibration_fraction"]),
+            "assignments_sha256": allocation["assignments_sha256"],
+            "cohorts": cohort_rows,
+        },
+        "outcomes_accessed": ledger["status"] == "closed",
+    }
+
+
 def _assign_persistent_events(
     incoming: pd.DataFrame,
     existing: pd.DataFrame,

@@ -40,7 +40,7 @@ from confirm_policy import calibration_command, confirmation_command
 from audit_external_cdms import audit_external_export
 from external_collection import (
     allocate_prospective_cohort, append_export, close_collection,
-    materialize_collection, read_collection, seal_collection,
+    collection_status, materialize_collection, read_collection, seal_collection,
 )
 from validation_plan import (
     evaluation_planning_table, maximum_passing_failures,
@@ -411,6 +411,87 @@ def test_external_collection_rejects_tampered_hash_chain(tmp_path):
     ledger.write_text(json.dumps(payload), encoding="utf-8")
     with np.testing.assert_raises(ValueError):
         read_collection(ledger)
+
+
+def test_external_collection_status_is_outcome_blind_and_cohort_specific(tmp_path):
+    records = []
+    for index in range(1, 25):
+        for message_index in range(3):
+            creation_day = 1 + message_index
+            record = external_cdm_record(
+                f"m{index}-{message_index}",
+                f"2026-01-{creation_day:02d}T00:00:00Z",
+                f"2026-01-{7 + index % 10:02d}T00:00:00Z",
+                probability=2e-5 if message_index == 2 else 1e-8,
+            )
+            record["SAT2_OBJECT_DESIGNATOR"] = str(90000 + index)
+            records.append(record)
+    source = write_external_export(tmp_path / "source.json", records)
+    ledger_path = tmp_path / "collection.json"
+    append_export(
+        source, ledger_path, tmp_path / "batches",
+        collection_start_utc="2026-01-01T00:00:00Z",
+        collection_end_utc="2026-02-01T00:00:00Z",
+        allocation_seed=42,
+        calibration_fraction=0.5,
+    )
+
+    status = collection_status(ledger_path)
+    ledger, complete = read_collection(ledger_path)
+
+    assert status["integrity_verified"] is True
+    assert status["status"] == "collecting"
+    assert status["outcomes_accessed"] is False
+    assert "positive_events" not in status
+    assert status["messages"] == len(complete)
+    assert status["events"] == complete["event_id"].nunique()
+    window = complete.loc[complete["time_to_tca"].between(2.0, 7.0, inclusive="both")]
+    expected_eligible = int((window.groupby("event_id").size() >= 3).sum())
+    assert status["events_eligible_minimum_history"] == expected_eligible
+    cohorts = status["allocation"]["cohorts"]
+    assert cohorts["calibration"]["assigned_events"] > 0
+    assert cohorts["evaluation"]["assigned_events"] > 0
+    assert sum(item["assigned_events"] for item in cohorts.values()) == status["events"]
+    assert status["allocation"]["assignments_sha256"] == ledger["allocation"]["assignments_sha256"]
+
+
+def test_external_collection_status_rejects_tampered_batch(tmp_path):
+    source = write_external_export(tmp_path / "source.json", [
+        external_cdm_record(
+            "m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"
+        )
+    ])
+    ledger = tmp_path / "collection.json"
+    result = append_export(
+        source, ledger, tmp_path / "batches",
+        collection_start_utc="2026-01-01T00:00:00Z",
+        collection_end_utc="2026-02-01T00:00:00Z",
+    )
+    batch_path = ledger.parent / result["batches"][0]["artifact_path"]
+    batch = pd.read_parquet(batch_path)
+    batch.loc[0, "risk"] = -3.0
+    batch.to_parquet(batch_path, index=False)
+
+    with np.testing.assert_raises(ValueError):
+        collection_status(ledger)
+
+
+def test_external_collection_status_validates_window_parameters(tmp_path):
+    source = write_external_export(tmp_path / "source.json", [
+        external_cdm_record(
+            "m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"
+        )
+    ])
+    ledger = tmp_path / "collection.json"
+    append_export(
+        source, ledger, tmp_path / "batches",
+        collection_start_utc="2026-01-01T00:00:00Z",
+        collection_end_utc="2026-02-01T00:00:00Z",
+    )
+    with np.testing.assert_raises(ValueError):
+        collection_status(ledger, minimum_history=0)
+    with np.testing.assert_raises(ValueError):
+        collection_status(ledger, min_days=7.0, max_days=2.0)
 
 
 def test_external_collection_snapshot_is_outcome_blind_and_source_bound(tmp_path):

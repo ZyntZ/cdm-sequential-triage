@@ -12,8 +12,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from external_collection import (
     append_export,
     close_collection,
+    collection_status,
     materialize_collection,
-    read_collection,
     seal_collection,
 )
 
@@ -57,6 +57,9 @@ def main() -> None:
 
     status = commands.add_parser("status")
     status.add_argument("--ledger", type=Path, required=True)
+    status.add_argument("--minimum-history", type=int, default=3)
+    status.add_argument("--min-days", type=float, default=2.0)
+    status.add_argument("--max-days", type=float, default=7.0)
 
     args = parser.parse_args()
     if args.command == "append":
@@ -88,7 +91,12 @@ def main() -> None:
             evaluation_labels_output=args.evaluation_labels_output,
         )
     else:
-        result, _ = read_collection(args.ledger)
+        result = collection_status(
+            args.ledger,
+            minimum_history=args.minimum_history,
+            min_days=args.min_days,
+            max_days=args.max_days,
+        )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
