@@ -36,7 +36,9 @@ from operator_dashboard import (
 )
 from evidence_dashboard import build_evidence_dashboard
 from run_demo import run_demo, verify_demo_bundle
-from confirm_policy import calibration_command, confirmation_command
+from confirm_policy import (
+    _confirmation_preflight, calibration_command, confirmation_command,
+)
 from audit_external_cdms import audit_external_export
 from external_collection import (
     allocate_prospective_cohort, append_export, close_collection,
@@ -1728,9 +1730,15 @@ def test_frozen_calibration_and_confirmation_are_disjoint():
     assert calibration["calibration"]["n_positive"] == 40
 
     result = evaluate(confirmation_scores(event_offset=100), calibration)
+    metrics = result["evaluation"]
     assert result["evaluation_events"] == 42
-    assert result["evaluation"]["danger_n"] == 40
-    assert result["evaluation"]["negative_n"] == 2
+    assert metrics["danger_n"] == 40
+    assert metrics["negative_n"] == 2
+    assert metrics["calibration_rank"] == calibration["calibration"]["rank"]
+    assert metrics["calibration_n_positive"] == 40
+    assert metrics["calibration_pac_bound"] == calibration["calibration"]["pac_bound"]
+    assert metrics["calibration_marginal_bound"] == calibration["calibration"]["marginal_bound"]
+    assert metrics["calibration_bound_satisfied"] is True
 
 
 def test_calibration_event_roster_digest_matches_declared_ids():
@@ -1773,6 +1781,31 @@ def test_confirmation_rejects_event_overlap():
 def test_confirmation_rejects_policy_drift():
     calibration = calibrate(confirmation_scores())
     calibration["policy"]["minimum_history"] = 1
+    with np.testing.assert_raises(ValueError):
+        evaluate(confirmation_scores(event_offset=100), calibration)
+
+
+def test_confirmation_rejects_tampered_calibration_rule_fields():
+    mutations = {
+        "rank": 2,
+        "n_positive": 41,
+        "alpha": 0.2,
+        "mode": "marginal",
+        "confidence": 0.9,
+        "marginal_bound": 0.9,
+        "pac_bound": 0.9,
+        "threshold": float("nan"),
+    }
+    for field, value in mutations.items():
+        calibration = calibrate(confirmation_scores())
+        calibration["calibration"][field] = value
+        with np.testing.assert_raises(ValueError):
+            evaluate(confirmation_scores(event_offset=100), calibration)
+
+
+def test_confirmation_rejects_incomplete_calibration_rule():
+    calibration = calibrate(confirmation_scores())
+    del calibration["calibration"]["pac_bound"]
     with np.testing.assert_raises(ValueError):
         evaluate(confirmation_scores(event_offset=100), calibration)
 
@@ -2532,7 +2565,16 @@ def runtime_calibration_artifact(model_hash="runtime-model", threshold=0.20):
             "min_days_to_tca": 2.0,
             "max_days_to_tca": 7.0,
         },
-        "calibration": {"threshold": threshold},
+        "calibration": {
+            "threshold": threshold,
+            "rank": 1,
+            "n_positive": 40,
+            "alpha": 0.10,
+            "mode": "pac",
+            "confidence": 0.95,
+            "marginal_bound": 1 / 41,
+            "pac_bound": 0.0721575245055145,
+        },
         "model_sha256": model_hash,
         "shift_gate_sha256": None,
         "model_manifest_sha256": None,
@@ -2745,6 +2787,24 @@ def test_confirmation_preflight_failure_does_not_burn_lock(tmp_path):
 
     assert not args.lock.exists()
     assert not args.output.exists()
+
+
+def test_confirmation_preflight_rejects_tampered_rule_before_lock(tmp_path):
+    import argparse
+    artifact = calibrate(confirmation_scores())
+    artifact["calibration"]["pac_bound"] = 0.9
+    scores = tmp_path / "evaluation.parquet"
+    confirmation_scores(event_offset=100).drop(columns="y").to_parquet(scores, index=False)
+    args = argparse.Namespace(
+        scores=scores,
+        gate=None,
+        model_manifest=None,
+        study_manifest=None,
+        study_lock=None,
+    )
+
+    with np.testing.assert_raises(ValueError):
+        _confirmation_preflight(args, artifact)
 
 
 def test_confirmation_command_writes_lock_and_result_after_valid_preflight(tmp_path):

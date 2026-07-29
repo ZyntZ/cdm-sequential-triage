@@ -3,14 +3,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import tempfile
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from scipy.stats import beta
 
-from policy import calibrate_positive_threshold, cp_upper, first_safe_decision_table, history_gated_event_table
+from policy import (
+    calibrate_positive_threshold,
+    calibration_rank,
+    cp_upper,
+    first_safe_decision_table,
+    history_gated_event_table,
+)
 from shift_gate import ConformalShiftGate
 
 POLICY = {
@@ -58,6 +66,62 @@ def validate_policy(policy: dict[str, Any] | None) -> dict[str, Any]:
     if not 0 <= float(result["min_days_to_tca"]) < float(result["max_days_to_tca"]):
         raise ValueError("Invalid decision window")
     return result
+
+
+def validate_calibration_artifact(
+    artifact: dict[str, Any],
+    expected_policy: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate the policy and internal consistency of a calibration artifact."""
+    if not isinstance(artifact, dict):
+        raise ValueError("Calibration artifact must be an object")
+    policy = validate_policy(artifact.get("policy"))
+    if expected_policy is not None and policy != validate_policy(expected_policy):
+        raise ValueError("Calibration artifact does not match the frozen policy")
+    rule = artifact.get("calibration")
+    required = {
+        "threshold", "rank", "n_positive", "alpha", "mode", "confidence",
+        "marginal_bound", "pac_bound",
+    }
+    if not isinstance(rule, dict) or set(rule) != required:
+        raise ValueError("Calibration rule fields do not match the confirmation schema")
+    if isinstance(rule["rank"], bool) or isinstance(rule["n_positive"], bool):
+        raise ValueError("Calibration rank and n_positive must be integers")
+    if not isinstance(rule["rank"], int) or not isinstance(rule["n_positive"], int):
+        raise ValueError("Calibration rank and n_positive must be integers")
+    rank, n_positive = rule["rank"], rule["n_positive"]
+    if n_positive <= 0 or not 1 <= rank <= n_positive:
+        raise ValueError("Calibration artifact has an invalid positive-event rank")
+    numeric_fields = ("threshold", "alpha", "confidence", "marginal_bound", "pac_bound")
+    try:
+        numeric = {name: float(rule[name]) for name in numeric_fields}
+    except (TypeError, ValueError) as error:
+        raise ValueError("Calibration rule contains a non-numeric field") from error
+    if not all(math.isfinite(numeric[name]) for name in numeric_fields):
+        raise ValueError("Calibration rule numeric fields must be finite")
+    if rule["mode"] != policy["calibration_mode"]:
+        raise ValueError("Calibration rule mode does not match the frozen policy")
+    if not math.isclose(numeric["alpha"], float(policy["alpha"]), rel_tol=0.0, abs_tol=1e-15):
+        raise ValueError("Calibration rule alpha does not match the frozen policy")
+    if not math.isclose(numeric["confidence"], float(policy["confidence"]), rel_tol=0.0, abs_tol=1e-15):
+        raise ValueError("Calibration rule confidence does not match the frozen policy")
+    expected_rank = calibration_rank(
+        n_positive, float(policy["alpha"]), mode=policy["calibration_mode"],
+        confidence=float(policy["confidence"]),
+    )
+    if rank != expected_rank:
+        raise ValueError("Calibration rank is inconsistent with n_positive and policy")
+    expected_marginal = rank / (n_positive + 1)
+    expected_pac = float(beta.ppf(
+        float(policy["confidence"]), rank, n_positive + 1 - rank
+    ))
+    if not math.isclose(numeric["marginal_bound"], expected_marginal, rel_tol=1e-12, abs_tol=1e-15):
+        raise ValueError("Calibration marginal bound is internally inconsistent")
+    if not math.isclose(numeric["pac_bound"], expected_pac, rel_tol=1e-12, abs_tol=1e-15):
+        raise ValueError("Calibration PAC bound is internally inconsistent")
+    if policy["calibration_mode"] == "pac" and numeric["pac_bound"] > float(policy["alpha"]):
+        raise ValueError("Calibration PAC bound exceeds the frozen alpha")
+    return policy, rule
 
 
 def policy_from_model_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -222,14 +286,11 @@ def evaluate(
     shift_gate: ConformalShiftGate | None = None,
     policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    artifact_policy = validate_policy(calibration_artifact.get("policy"))
     expected_policy = POLICY if policy is None else validate_policy(policy)
-    if artifact_policy != expected_policy:
-        raise ValueError("Calibration artifact does not match the frozen policy")
-    policy = artifact_policy
-    threshold = calibration_artifact.get("calibration", {}).get("threshold")
-    if threshold is None:
-        raise ValueError("Calibration artifact has no threshold")
+    policy, calibration_rule = validate_calibration_artifact(
+        calibration_artifact, expected_policy
+    )
+    threshold = calibration_rule["threshold"]
     expected_gate_hash = calibration_artifact.get("shift_gate_sha256")
     supplied_gate_hash = None if shift_gate is None else shift_gate.fingerprint()
     if expected_gate_hash != supplied_gate_hash:
@@ -289,6 +350,15 @@ def evaluate(
         "danger_n": danger_n,
         "danger_rate": danger_k / danger_n,
         "danger_ucb": cp_upper(danger_k, danger_n, policy["confidence"]),
+        "calibration_rank": int(calibration_rule["rank"]),
+        "calibration_n_positive": int(calibration_rule["n_positive"]),
+        "calibration_marginal_bound": float(calibration_rule["marginal_bound"]),
+        "calibration_pac_bound": float(calibration_rule["pac_bound"]),
+        "calibration_bound_satisfied": bool(
+            float(calibration_rule["pac_bound"]) <= float(policy["alpha"])
+            if policy["calibration_mode"] == "pac"
+            else float(calibration_rule["marginal_bound"]) <= float(policy["alpha"])
+        ),
         "safe_negative": int(safe_negative.sum()),
         "negative_n": negative_n,
         "safe_negative_rate": float(safe_negative.sum() / negative_n),

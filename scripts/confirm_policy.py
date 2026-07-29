@@ -19,6 +19,7 @@ from confirmation import (
     file_sha256,
     policy_from_model_manifest,
     read_json,
+    validate_calibration_artifact,
     write_json,
 )
 from shift_gate import ConformalShiftGate
@@ -129,9 +130,7 @@ def _confirmation_preflight(
         if policy_from_model_manifest(manifest) != artifact.get("policy"):
             raise ValueError("Calibration policy and model manifest do not match")
 
-    policy = artifact.get("policy")
-    if not isinstance(policy, dict) or not isinstance(policy.get("score_column"), str):
-        raise ValueError("Calibration artifact has no valid policy")
+    policy, _ = validate_calibration_artifact(artifact)
     required = {
         "event_id", "time_to_tca", "model_sha256", policy["score_column"]
     }
