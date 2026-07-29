@@ -13,7 +13,8 @@ from event_aligned_model import (
     fit_dynamic_model, positive_tail_weights, prepare_dynamic_frame, score_dynamic_frame,
 )
 from external_cdm import (
-    adapt_external_cdms, derive_event_labels, event_grouping_review,
+    REQUIRED_EXTERNAL_FEATURES, adapt_external_cdms, derive_event_labels,
+    event_grouping_review,
     outcome_blind_features, parse_cdm_json, parse_cdm_source, readiness_report,
 )
 from event_aligned_robustness import (
@@ -198,13 +199,62 @@ def test_external_cdm_readiness_reports_sequential_and_positive_shortfall():
         external_cdm_record("m2", "2026-01-02T00:00:00Z", "2026-01-07T00:10:00Z", 2e-7),
         external_cdm_record("m3", "2026-01-03T00:00:00Z", "2026-01-07T00:20:00Z", 2e-5),
     ]
-    report = readiness_report(adapt_external_cdms(records))
+    report = readiness_report(
+        adapt_external_cdms(records), collection_complete=True
+    )
     assert report["events"] == 1
     assert report["events_eligible_minimum_history"] == 1
+    assert report["collection_complete_attested"] is True
+    assert report["positive_counts_suppressed"] is False
     assert report["provisional_positive_events"] == 1
     assert report["provisional_total_positive_target_met"] is False
     assert report["scientific_status"] == "candidate-collection-only"
     assert len(report["limitations"]) == 3
+
+
+def test_readiness_report_suppresses_terminal_risk_counts_by_default():
+    records = [
+        external_cdm_record(
+            "m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z", 2e-5
+        ),
+        external_cdm_record(
+            "m2", "2026-01-02T00:00:00Z", "2026-01-07T00:10:00Z", 2e-5
+        ),
+        external_cdm_record(
+            "m3", "2026-01-03T00:00:00Z", "2026-01-07T00:20:00Z", 2e-5
+        ),
+    ]
+    report = readiness_report(adapt_external_cdms(records))
+
+    assert report["collection_complete_attested"] is False
+    assert report["positive_counts_suppressed"] is True
+    assert report["provisionally_labelled_events"] is None
+    assert report["provisional_positive_events"] is None
+    assert report["positive_rate"] is None
+    assert report["provisional_calibration_positive_target_met"] is None
+    assert report["provisional_evaluation_positive_target_met"] is None
+    assert report["provisional_total_positive_target_met"] is None
+
+
+def test_readiness_report_uses_literal_terminal_row_after_attestation():
+    frame = pd.DataFrame({
+        "event_id": ["event", "event"],
+        "time_to_tca": [1.0, 5.0],
+        "risk": [np.nan, -4.0],
+        **{
+            column: [1.0, 1.0]
+            for column in REQUIRED_EXTERNAL_FEATURES
+            if column not in {"risk"}
+        },
+    })
+    frame["event_pair"] = "1|2"
+    frame["tca"] = pd.Timestamp("2026-01-07T00:00:00Z")
+
+    report = readiness_report(frame, collection_complete=True)
+
+    assert report["provisionally_labelled_events"] == 0
+    assert report["events_without_finite_final_pc"] == 1
+    assert report["provisional_positive_events"] == 0
 
 
 def test_external_cdm_parser_accepts_array_and_ndjson():
@@ -514,6 +564,10 @@ def test_external_collection_snapshot_is_outcome_blind_and_source_bound(tmp_path
     assert frame["time_to_tca"].ge(2.0).all()
     assert report["collection"]["batches"] == 1
     assert len(report["collection"]["source_sha256s"]) == 1
+    assert report["collection_complete_attested"] is False
+    assert report["positive_counts_suppressed"] is True
+    assert report["provisional_positive_events"] is None
+    assert report["provisional_total_positive_target_met"] is None
     assert len(report["collection"]["ledger_sha256"]) == 64
     assert report["features_sha256"] == __import__("hashlib").sha256(features.read_bytes()).hexdigest()
 

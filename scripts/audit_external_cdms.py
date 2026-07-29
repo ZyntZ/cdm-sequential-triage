@@ -81,7 +81,9 @@ def audit_external_export(
     normalized = adapt_external_cdms(
         records, tca_tolerance_minutes=tca_tolerance_minutes
     )
-    report = readiness_report(normalized)
+    report = readiness_report(
+        normalized, collection_complete=collection_complete
+    )
     report["source"] = {
         "path": str(input_path.resolve()),
         "messages": len(records),

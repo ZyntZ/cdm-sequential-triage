@@ -515,7 +515,7 @@ def materialize_collection(
             "Prospective cohort artifacts require a sealed outcome-blind collection"
         )
     features = outcome_blind_features(complete)
-    report = readiness_report(complete)
+    report = readiness_report(complete, collection_complete=False)
     grouping = report["event_grouping"]
     if cohort_paths and grouping["manual_review_required"]:
         flagged = ", ".join(

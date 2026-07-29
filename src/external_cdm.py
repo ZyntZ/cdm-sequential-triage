@@ -459,6 +459,7 @@ def readiness_report(
     minimum_history: int = 3,
     min_days: float = 2.0,
     max_days: float = 7.0,
+    collection_complete: bool = False,
 ) -> dict[str, Any]:
     """Quantify whether an external collection can enter the frozen v13 study."""
     required = {"event_id", "time_to_tca", "risk", *REQUIRED_EXTERNAL_FEATURES}
@@ -469,11 +470,38 @@ def readiness_report(
     history = window.groupby("event_id").size()
     eligible_ids = set(history.loc[history >= minimum_history].index.astype(str))
     all_ids = set(frame["event_id"].astype(str))
-    final = frame.sort_values(["event_id", "time_to_tca"]).groupby("event_id", as_index=False).first()
-    finite_final_risk = np.isfinite(pd.to_numeric(final["risk"], errors="coerce"))
-    labelled = final.loc[finite_final_risk].copy()
-    labelled["y"] = (labelled["risk"].astype(float) >= -6.0).astype(int)
-    positive = int(labelled["y"].sum())
+    if collection_complete:
+        final = (
+            frame.sort_values(["event_id", "time_to_tca"])
+            .groupby("event_id", as_index=False)
+            .nth(0)
+            .reset_index(drop=True)
+        )
+        finite_final_risk = np.isfinite(
+            pd.to_numeric(final["risk"], errors="coerce")
+        )
+        labelled = final.loc[finite_final_risk].copy()
+        labelled["y"] = (labelled["risk"].astype(float) >= -6.0).astype(int)
+        positive = int(labelled["y"].sum())
+        label_fields = {
+            "events_without_finite_final_pc": int(len(final) - len(labelled)),
+            "provisionally_labelled_events": int(len(labelled)),
+            "provisional_positive_events": positive,
+            "positive_rate": None if labelled.empty else positive / len(labelled),
+            "provisional_calibration_positive_target_met": positive >= 100,
+            "provisional_evaluation_positive_target_met": positive >= 200,
+            "provisional_total_positive_target_met": positive >= 300,
+        }
+    else:
+        label_fields = {
+            "events_without_finite_final_pc": None,
+            "provisionally_labelled_events": None,
+            "provisional_positive_events": None,
+            "positive_rate": None,
+            "provisional_calibration_positive_target_met": None,
+            "provisional_evaluation_positive_target_met": None,
+            "provisional_total_positive_target_met": None,
+        }
     missingness = {
         column: float(frame[column].isna().mean())
         for column in REQUIRED_EXTERNAL_FEATURES
@@ -484,13 +512,9 @@ def readiness_report(
         "events": len(all_ids),
         "events_with_window_history": int(history.size),
         "events_eligible_minimum_history": len(eligible_ids),
-        "events_without_finite_final_pc": int(len(final) - len(labelled)),
-        "provisionally_labelled_events": int(len(labelled)),
-        "provisional_positive_events": positive,
-        "positive_rate": None if labelled.empty else positive / len(labelled),
-        "provisional_calibration_positive_target_met": positive >= 100,
-        "provisional_evaluation_positive_target_met": positive >= 200,
-        "provisional_total_positive_target_met": positive >= 300,
+        "collection_complete_attested": bool(collection_complete),
+        "positive_counts_suppressed": not bool(collection_complete),
+        **label_fields,
         "feature_missing_fraction": missingness,
         "complete_feature_rows": int(frame[list(REQUIRED_EXTERNAL_FEATURES)].notna().all(axis=1).sum()),
         "event_grouping": grouping,
@@ -504,7 +528,11 @@ def readiness_report(
             )
         ),
         "limitations": [
-            "terminal Pc labels are provisional until collection completeness is attested",
+            (
+                "terminal Pc counts are available only after collection completeness is attested"
+                if not collection_complete
+                else "terminal Pc counts are post-completion diagnostics, not confirmation results"
+            ),
             "source-to-ESA feature compatibility does not establish exchangeability",
             (
                 "flagged event groups require manual review before study freeze"
