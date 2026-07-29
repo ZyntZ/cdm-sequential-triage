@@ -438,6 +438,112 @@ def test_external_collection_rejects_duplicate_source_and_conflicting_message(tm
     assert len(complete) == 1
 
 
+def test_append_export_recovers_verified_orphan_after_hard_crash(tmp_path, monkeypatch):
+    import external_collection as collection_module
+
+    source = write_external_export(tmp_path / "source.json", [
+        external_cdm_record(
+            "m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"
+        )
+    ])
+    ledger = tmp_path / "collection.json"
+    batches = tmp_path / "batches"
+    common = dict(
+        collection_start_utc="2026-01-01T00:00:00Z",
+        collection_end_utc="2026-02-01T00:00:00Z",
+    )
+    real_atomic_json = collection_module._atomic_json
+
+    def hard_crash(_payload, _path):
+        raise SystemExit("simulated hard crash")
+
+    monkeypatch.setattr(collection_module, "_atomic_json", hard_crash)
+    with np.testing.assert_raises(SystemExit):
+        append_export(source, ledger, batches, **common)
+    orphan = next(batches.glob("batch-*.parquet"))
+    orphan_sha256 = file_sha256(orphan)
+    assert not ledger.exists()
+
+    monkeypatch.setattr(collection_module, "_atomic_json", real_atomic_json)
+    result = append_export(source, ledger, batches, **common)
+    _, complete = read_collection(ledger)
+
+    assert len(result["batches"]) == 1
+    assert result["batches"][0]["recovered_orphan_batch"] is True
+    assert result["batches"][0]["artifact_sha256"] == orphan_sha256
+    assert file_sha256(orphan) == orphan_sha256
+    assert complete["source_message_id"].tolist() == ["m1"]
+    assert len(list(batches.glob("batch-*.parquet"))) == 1
+
+
+def test_append_export_rejects_mismatched_orphan_without_modifying_it(tmp_path):
+    source = write_external_export(tmp_path / "source.json", [
+        external_cdm_record(
+            "m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"
+        )
+    ])
+    ledger = tmp_path / "collection.json"
+    batches = tmp_path / "batches"
+    batches.mkdir()
+    source_sha256 = file_sha256(source)
+    orphan = batches / f"batch-000001-{source_sha256[:12]}.parquet"
+    pd.DataFrame({"source_message_id": ["other"], "risk": [-4.0]}).to_parquet(
+        orphan, index=False
+    )
+    original_sha256 = file_sha256(orphan)
+
+    with np.testing.assert_raises_regex(FileExistsError, "differs from expected"):
+        append_export(
+            source, ledger, batches,
+            collection_start_utc="2026-01-01T00:00:00Z",
+            collection_end_utc="2026-02-01T00:00:00Z",
+        )
+
+    assert not ledger.exists()
+    assert orphan.exists()
+    assert file_sha256(orphan) == original_sha256
+
+
+def test_recovered_orphan_survives_retryable_ledger_failure(tmp_path, monkeypatch):
+    import external_collection as collection_module
+
+    source = write_external_export(tmp_path / "source.json", [
+        external_cdm_record(
+            "m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"
+        )
+    ])
+    ledger = tmp_path / "collection.json"
+    batches = tmp_path / "batches"
+    common = dict(
+        collection_start_utc="2026-01-01T00:00:00Z",
+        collection_end_utc="2026-02-01T00:00:00Z",
+    )
+    real_atomic_json = collection_module._atomic_json
+    monkeypatch.setattr(
+        collection_module, "_atomic_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(SystemExit("crash")),
+    )
+    with np.testing.assert_raises(SystemExit):
+        append_export(source, ledger, batches, **common)
+    orphan = next(batches.glob("batch-*.parquet"))
+    orphan_sha256 = file_sha256(orphan)
+
+    monkeypatch.setattr(
+        collection_module, "_atomic_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    with np.testing.assert_raises(OSError):
+        append_export(source, ledger, batches, **common)
+
+    assert not ledger.exists()
+    assert orphan.exists()
+    assert file_sha256(orphan) == orphan_sha256
+
+    monkeypatch.setattr(collection_module, "_atomic_json", real_atomic_json)
+    result = append_export(source, ledger, batches, **common)
+    assert result["batches"][0]["recovered_orphan_batch"] is True
+
+
 def test_external_collection_verifies_source_and_batch_lineage(tmp_path):
     source = write_external_export(tmp_path / "source.json", [
         external_cdm_record("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z")

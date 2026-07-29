@@ -87,6 +87,37 @@ def _new_event_id(pair: str, message_id: str) -> str:
     return "ext-" + hashlib.sha256(f"{pair}|{message_id}".encode()).hexdigest()[:24]
 
 
+def _logical_batch_fingerprints(frame: pd.DataFrame) -> dict[str, str]:
+    """Return one canonical content fingerprint per source message."""
+    if "source_message_id" not in frame.columns:
+        raise ValueError("Batch artifact has no source_message_id column")
+    message_ids = frame["source_message_id"].astype(str)
+    if message_ids.duplicated().any():
+        raise ValueError("Batch artifact contains duplicate source_message_id values")
+    return {
+        str(row.source_message_id): message_fingerprint(row._asdict())
+        for row in frame.itertuples(index=False)
+    }
+
+
+def _recoverable_orphan_matches(path: Path, expected: pd.DataFrame) -> bool:
+    """Verify an unregistered batch artifact against re-derived logical rows."""
+    try:
+        orphan = pd.read_parquet(path)
+    except Exception as error:
+        raise FileExistsError(
+            f"Unregistered batch artifact is unreadable: {path}"
+        ) from error
+    try:
+        orphan_fingerprints = _logical_batch_fingerprints(orphan)
+        expected_fingerprints = _logical_batch_fingerprints(expected)
+    except ValueError as error:
+        raise FileExistsError(
+            f"Unregistered batch artifact cannot be verified: {path}"
+        ) from error
+    return orphan_fingerprints == expected_fingerprints
+
+
 def _batch_entry_sha256(batch: dict[str, Any]) -> str:
     material = {
         key: batch.get(key)
@@ -94,6 +125,7 @@ def _batch_entry_sha256(batch: dict[str, Any]) -> str:
             "batch", "source_sha256", "source_messages", "accepted_messages",
             "duplicate_messages", "artifact_path", "artifact_sha256",
             "first_creation_date", "last_creation_date", "previous_entry_sha256",
+            "recovered_orphan_batch",
         )
     }
     raw = json.dumps(
@@ -444,9 +476,21 @@ def append_export(
     batches_dir.mkdir(parents=True, exist_ok=True)
     batch_number = len(ledger["batches"]) + 1
     batch_path = batches_dir / f"batch-{batch_number:06d}-{source_sha256[:12]}.parquet"
+    recovered_orphan = False
     if batch_path.exists():
-        raise FileExistsError(f"Batch artifact already exists: {batch_path}")
-    _atomic_parquet(accepted, batch_path)
+        relative_batch_path = os.path.relpath(batch_path, ledger_path.parent)
+        registered_paths = {
+            str(batch.get("artifact_path")) for batch in ledger.get("batches", [])
+        }
+        if relative_batch_path in registered_paths:
+            raise FileExistsError(f"Registered batch artifact already exists: {batch_path}")
+        if not _recoverable_orphan_matches(batch_path, accepted):
+            raise FileExistsError(
+                f"Unregistered batch artifact differs from expected content: {batch_path}"
+            )
+        recovered_orphan = True
+    else:
+        _atomic_parquet(accepted, batch_path)
     batch_record = {
         "batch": batch_number,
         "appended_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -460,6 +504,7 @@ def append_export(
         "first_creation_date": str(accepted["creation_date"].min()),
         "last_creation_date": str(accepted["creation_date"].max()),
         "previous_entry_sha256": ledger.get("batch_chain_head"),
+        "recovered_orphan_batch": recovered_orphan,
     }
     batch_record["entry_sha256"] = _batch_entry_sha256(batch_record)
     ledger["batches"].append(batch_record)
@@ -470,7 +515,8 @@ def append_export(
     try:
         _atomic_json(ledger, ledger_path)
     except Exception:
-        batch_path.unlink(missing_ok=True)
+        if not recovered_orphan:
+            batch_path.unlink(missing_ok=True)
         raise
     return ledger
 
