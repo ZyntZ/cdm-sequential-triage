@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from study import read_locked_study
+from validation_plan import minimum_positive_events, validation_design_summary
 
 from external_collection import (
     append_export,
@@ -187,8 +188,6 @@ def check_v13_readiness(
         except Exception as error:
             record("frozen_new_study", False, f"new-study lock check failed: {error}")
 
-    failed = [check["name"] for check in checks if check["passed"] is False]
-    missing = [check["name"] for check in checks if check["passed"] is None]
     targets = {
         "recommended_calibration_positive_events": int(
             new_study.get("recommended_calibration_positive_events", 0)
@@ -204,6 +203,63 @@ def check_v13_readiness(
         ),
         "evaluation_success_criterion": new_study.get("primary_success"),
     }
+    alpha = float(prereg.get("candidate", {}).get("alpha", 0.10))
+    calibration_confidence = float(
+        prereg.get("candidate", {}).get("calibration_confidence", 0.95)
+    )
+    evaluation_confidence = float(
+        prereg.get("candidate", {}).get("evaluation_confidence", 0.95)
+    )
+    statistical_design = None
+    try:
+        statistical_design = validation_design_summary(
+            targets["recommended_calibration_positive_events"],
+            targets["recommended_evaluation_positive_events"],
+            alpha=alpha,
+            confidence=calibration_confidence,
+        )
+        if evaluation_confidence != calibration_confidence:
+            evaluation = validation_design_summary(
+                targets["recommended_calibration_positive_events"],
+                targets["recommended_evaluation_positive_events"],
+                alpha=alpha,
+                confidence=evaluation_confidence,
+            )["evaluation"]
+            statistical_design["evaluation"] = evaluation
+        expected_total = (
+            targets["recommended_calibration_positive_events"]
+            + targets["recommended_evaluation_positive_events"]
+        )
+        expected_four_failure_minimum = minimum_positive_events(
+            4, alpha=alpha, confidence=evaluation_confidence
+        )
+        design_ok = (
+            statistical_design["calibration"]["finite_threshold_available"]
+            and statistical_design["calibration"]["pac_bound"] <= alpha
+            and statistical_design["evaluation"][
+                "maximum_passing_dangerous_exclusions"
+            ] >= 0
+            and targets["recommended_total_positive_events"] == expected_total
+            and targets["minimum_evaluation_positive_events_if_four_failures"]
+            == expected_four_failure_minimum
+        )
+        record(
+            "statistical_design",
+            design_ok,
+            (
+                "finite-sample calibration and evaluation claims recomputed successfully"
+                if design_ok else
+                "preregistered sample-size claims are internally inconsistent"
+            ),
+        )
+    except (TypeError, ValueError):
+        record(
+            "statistical_design", False,
+            "preregistered sample-size or error-control parameters are invalid",
+        )
+
+    failed = [check["name"] for check in checks if check["passed"] is False]
+    missing = [check["name"] for check in checks if check["passed"] is None]
     ready_for_scientific_confirmation = (
         not failed and not missing and collection is not None and study is not None
     )
@@ -215,6 +271,7 @@ def check_v13_readiness(
         "missing_prerequisites": missing,
         "checks": checks,
         "targets": targets,
+        "statistical_design": statistical_design,
         "collection": collection,
         "interpretation": (
             "v13 is frozen and technically ready, but scientific confirmation requires "

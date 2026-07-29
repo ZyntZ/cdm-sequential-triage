@@ -47,8 +47,8 @@ from external_collection import (
     collection_status, materialize_collection, read_collection, seal_collection,
 )
 from validation_plan import (
-    evaluation_planning_table, maximum_passing_failures,
-    minimum_positive_events, pass_probability,
+    calibration_design, evaluation_planning_table, maximum_passing_failures,
+    minimum_positive_events, pass_probability, validation_design_summary,
 )
 from prefix_features import build_prefix_features, eligible_prefixes
 from robustness import subgroup_metrics
@@ -1621,6 +1621,24 @@ def test_validation_plan_known_clopper_pearson_requirements():
     assert minimum_positive_events(4) == 89
     assert maximum_passing_failures(200) == 12
     assert 0.79 < pass_probability(200, 0.05) < 0.80
+
+
+def test_calibration_design_matches_frozen_v13_claim():
+    design = calibration_design(100, alpha=0.10, confidence=0.95)
+
+    assert design["rank"] == 5
+    assert design["finite_threshold_available"] is True
+    assert 0.0891 < design["pac_bound"] < 0.0893
+    assert calibration_design(28)["finite_threshold_available"] is False
+    assert calibration_design(29)["rank"] == 1
+
+
+def test_validation_design_summary_matches_frozen_v13_claims():
+    design = validation_design_summary(100, 200)
+
+    assert design["calibration"]["rank"] == 5
+    assert design["evaluation"]["maximum_passing_dangerous_exclusions"] == 12
+    assert 0.79 < design["evaluation"]["pass_probability_at_assumed_rate"] < 0.80
 
 
 def test_evaluation_planning_table_is_monotone_in_true_risk():
@@ -4374,6 +4392,49 @@ def test_v13_readiness_verifies_frozen_artifacts_without_outcomes():
     assert result["targets"]["recommended_calibration_positive_events"] == 100
     assert result["targets"]["recommended_evaluation_positive_events"] == 200
     assert result["targets"]["minimum_evaluation_positive_events_if_four_failures"] == 89
+    assert result["statistical_design"]["calibration"]["rank"] == 5
+    assert result["statistical_design"]["evaluation"][
+        "maximum_passing_dangerous_exclusions"
+    ] == 12
+    design_check = next(
+        check for check in result["checks"] if check["name"] == "statistical_design"
+    )
+    assert design_check["passed"] is True
+
+
+def test_v13_readiness_rejects_inconsistent_sample_size_claims(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    preregistration = json.loads(
+        (root / "artifacts" / "next_validation_preregistration_v12.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    preregistration["new_study"]["recommended_total_positive_events"] = 299
+    preregistration_path = tmp_path / "preregistration.json"
+    preregistration_path.write_text(
+        json.dumps(preregistration) + "\n", encoding="utf-8"
+    )
+    lock_path = tmp_path / "preregistration.lock"
+    lock_path.write_text(json.dumps({
+        "preregistration_sha256": file_sha256(preregistration_path)
+    }) + "\n", encoding="utf-8")
+    manifest = json.loads(
+        (root / "artifacts" / "catboost_tail_aligned_final_v13.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    manifest["preregistration"]["sha256"] = file_sha256(preregistration_path)
+    manifest["preregistration"]["lock_sha256"] = file_sha256(lock_path)
+    manifest_path = tmp_path / "model.json"
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+    result = check_v13_readiness(
+        preregistration_path, lock_path, manifest_path,
+        root / "artifacts" / "catboost_tail_aligned_final_v13.cbm",
+    )
+
+    assert "statistical_design" in result["failed_checks"]
+    assert result["ready_for_scientific_confirmation"] is False
 
 
 def test_v13_readiness_rejects_tampered_model_manifest(tmp_path):
