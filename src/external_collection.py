@@ -5,12 +5,18 @@ import hashlib
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - POSIX production target
+    fcntl = None
 
 from external_cdm import (
     adapt_external_cdms,
@@ -22,6 +28,22 @@ from external_cdm import (
 from study import file_sha256, read_locked_study
 
 SCHEMA_VERSION = 2
+
+
+@contextmanager
+def ledger_lock(ledger_path: str | Path):
+    """Serialize ledger mutations with a crash-released POSIX advisory lock."""
+    if fcntl is None:
+        raise RuntimeError("External collection locking requires POSIX fcntl")
+    ledger_path = Path(ledger_path)
+    lock_path = ledger_path.with_suffix(ledger_path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            yield lock_path
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def _atomic_json(payload: dict[str, Any], path: Path) -> None:
@@ -381,7 +403,7 @@ def _validate_collection_period(frame: pd.DataFrame, period: dict[str, str]) -> 
 
 
 
-def append_export(
+def _append_export_unlocked(
     source_path: str | Path,
     ledger_path: str | Path,
     batches_dir: str | Path,
@@ -519,6 +541,19 @@ def append_export(
             batch_path.unlink(missing_ok=True)
         raise
     return ledger
+
+
+def append_export(
+    source_path: str | Path,
+    ledger_path: str | Path,
+    batches_dir: str | Path,
+    **options,
+) -> dict[str, Any]:
+    """Append one export while holding the collection ledger lock."""
+    with ledger_lock(ledger_path):
+        return _append_export_unlocked(
+            source_path, ledger_path, batches_dir, **options
+        )
 
 
 def materialize_collection(
@@ -675,7 +710,7 @@ def materialize_collection(
     return report
 
 
-def seal_collection(ledger_path: str | Path) -> dict[str, Any]:
+def _seal_collection_unlocked(ledger_path: str | Path) -> dict[str, Any]:
     """Stop ingestion without deriving or accessing terminal labels."""
     ledger_path = Path(ledger_path)
     ledger, complete = read_collection(ledger_path)
@@ -699,7 +734,13 @@ def seal_collection(ledger_path: str | Path) -> dict[str, Any]:
 
 
 
-def close_collection(
+def seal_collection(ledger_path: str | Path) -> dict[str, Any]:
+    """Seal one collection while holding the collection ledger lock."""
+    with ledger_lock(ledger_path):
+        return _seal_collection_unlocked(ledger_path)
+
+
+def _close_collection_unlocked(
     ledger_path: str | Path,
     labels_output: str | Path,
     *,
@@ -797,3 +838,15 @@ def close_collection(
             path.unlink(missing_ok=True)
         raise
     return ledger
+
+def close_collection(
+    ledger_path: str | Path,
+    labels_output: str | Path,
+    **options,
+) -> dict[str, Any]:
+    """Close one collection while holding the collection ledger lock."""
+    with ledger_lock(ledger_path):
+        return _close_collection_unlocked(
+            ledger_path, labels_output, **options
+        )
+

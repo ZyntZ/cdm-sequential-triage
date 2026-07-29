@@ -544,6 +544,102 @@ def test_recovered_orphan_survives_retryable_ledger_failure(tmp_path, monkeypatc
     assert result["batches"][0]["recovered_orphan_batch"] is True
 
 
+def test_concurrent_append_exports_preserve_all_batches(tmp_path):
+    import threading
+
+    sources = []
+    for index in range(3):
+        record = external_cdm_record(
+            f"m{index}",
+            f"2026-01-0{index + 1}T00:00:00Z",
+            f"2026-01-{7 + index:02d}T00:00:00Z",
+        )
+        record["SAT2_OBJECT_DESIGNATOR"] = str(90001 + index)
+        sources.append(
+            write_external_export(tmp_path / f"source-{index}.json", [record])
+        )
+    ledger = tmp_path / "collection.json"
+    batches = tmp_path / "batches"
+    common = dict(
+        collection_start_utc="2026-01-01T00:00:00Z",
+        collection_end_utc="2026-02-01T00:00:00Z",
+    )
+    barrier = threading.Barrier(len(sources))
+    errors = []
+
+    def worker(source):
+        try:
+            barrier.wait()
+            append_export(source, ledger, batches, **common)
+        except Exception as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=worker, args=(source,)) for source in sources]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    stored, complete = read_collection(ledger)
+    assert [batch["batch"] for batch in stored["batches"]] == [1, 2, 3]
+    assert stored["batch_chain_head"] == stored["batches"][-1]["entry_sha256"]
+    assert complete["source_message_id"].nunique() == 3
+    assert len(list(batches.glob("batch-*.parquet"))) == 3
+
+
+def test_concurrent_duplicate_append_commits_once(tmp_path):
+    import threading
+
+    source = write_external_export(tmp_path / "source.json", [
+        external_cdm_record(
+            "m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"
+        )
+    ])
+    ledger = tmp_path / "collection.json"
+    batches = tmp_path / "batches"
+    common = dict(
+        collection_start_utc="2026-01-01T00:00:00Z",
+        collection_end_utc="2026-02-01T00:00:00Z",
+    )
+    barrier = threading.Barrier(3)
+    successes = []
+    failures = []
+
+    def worker():
+        barrier.wait()
+        try:
+            append_export(source, ledger, batches, **common)
+            successes.append(True)
+        except ValueError as error:
+            failures.append(str(error))
+
+    threads = [threading.Thread(target=worker) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(successes) == 1
+    assert len(failures) == 2
+    assert all("already been appended" in error for error in failures)
+    stored, complete = read_collection(ledger)
+    assert len(stored["batches"]) == 1
+    assert len(complete) == 1
+
+
+def test_ledger_lock_is_released_after_exception(tmp_path):
+    import external_collection as collection_module
+
+    ledger = tmp_path / "collection.json"
+    with np.testing.assert_raises(RuntimeError):
+        with collection_module.ledger_lock(ledger):
+            raise RuntimeError("simulated failure")
+
+    with collection_module.ledger_lock(ledger):
+        assert (tmp_path / "collection.json.lock").exists()
+
+
 def test_external_collection_verifies_source_and_batch_lineage(tmp_path):
     source = write_external_export(tmp_path / "source.json", [
         external_cdm_record("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z")

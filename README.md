@@ -139,6 +139,7 @@ python scripts/audit_external_cdms.py \
 ```
 
 For repeated exports, use the append-only collection ledger. The collection period, TCA grouping tolerance, allocation seed, and calibration fraction are fixed on the first append. Every new event is assigned immediately by a SHA-256 rule using only `event_id` and the frozen seed; no `Pc`, label, mission group, or later history enters the assignment. Every raw export is bound by SHA-256, accepted messages are stored in immutable Parquet batches, and batches form a hash chain. Re-exported messages are deduplicated only when normalized content is identical. Conflicting copies are rejected. Existing event IDs remain stable when later CDMs shift TCA within the frozen tolerance. If a process stops after an atomic batch write but before the ledger commit, retrying the same export verifies the unregistered Parquet rows by canonical message fingerprints and reuses the file without rewriting it. Mismatched or registered artifacts are never overwritten.
+Ledger mutations are also serialized with a POSIX advisory lock on `<ledger>.lock`. Concurrent append, seal, and close operations therefore re-read and commit the ledger one at a time; the kernel releases the lock automatically if a process exits or crashes. The sidecar lock file is persistent and must not be deleted while collection tools may be running.
 
 ```bash
 python scripts/collect_external_cdms.py append \
