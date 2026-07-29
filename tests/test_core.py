@@ -567,6 +567,77 @@ def test_materialize_collection_writes_disjoint_label_blind_cohorts(tmp_path):
     assert report["prospective_allocation"]["assignments_sha256"] == allocation["assignments_sha256"]
 
 
+def test_materialize_collection_blocks_ambiguous_event_grouping(tmp_path):
+    records = [
+        external_cdm_record(
+            "m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"
+        ),
+        external_cdm_record(
+            "m2", "2026-01-01T01:00:00Z", "2026-01-07T00:20:00Z"
+        ),
+        external_cdm_record(
+            "m3", "2026-01-01T02:00:00Z", "2026-01-07T00:40:00Z"
+        ),
+    ]
+    for index, record in enumerate(records, start=1):
+        record["SAT2_OBJECT_DESIGNATOR"] = "90001"
+    source = write_external_export(tmp_path / "source.json", records)
+    ledger = tmp_path / "collection.json"
+    append_export(
+        source, ledger, tmp_path / "batches",
+        collection_start_utc="2026-01-01T00:00:00Z",
+        collection_end_utc="2026-02-01T00:00:00Z",
+        allocation_seed=42,
+        calibration_fraction=0.5,
+    )
+    seal_collection(ledger)
+    outputs = {
+        "features_output": tmp_path / "all-features.parquet",
+        "readiness_output": tmp_path / "readiness.json",
+        "calibration_features": tmp_path / "calibration-features.parquet",
+        "evaluation_features": tmp_path / "evaluation-features.parquet",
+        "calibration_roster": tmp_path / "calibration-roster.parquet",
+        "evaluation_roster": tmp_path / "evaluation-roster.parquet",
+        "allocation_output": tmp_path / "allocation.json",
+    }
+
+    with np.testing.assert_raises_regex(
+        ValueError, "blocked by ambiguous event grouping"
+    ):
+        materialize_collection(ledger, **outputs)
+
+    assert not any(path.exists() for path in outputs.values())
+
+
+def test_materialize_collection_allows_audit_only_ambiguous_snapshot(tmp_path):
+    records = [
+        external_cdm_record(
+            "m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"
+        ),
+        external_cdm_record(
+            "m2", "2026-01-01T01:00:00Z", "2026-01-07T00:20:00Z"
+        ),
+        external_cdm_record(
+            "m3", "2026-01-01T02:00:00Z", "2026-01-07T00:40:00Z"
+        ),
+    ]
+    source = write_external_export(tmp_path / "source.json", records)
+    ledger = tmp_path / "collection.json"
+    append_export(
+        source, ledger, tmp_path / "batches",
+        collection_start_utc="2026-01-01T00:00:00Z",
+        collection_end_utc="2026-02-01T00:00:00Z",
+    )
+    features = tmp_path / "features.parquet"
+    readiness = tmp_path / "readiness.json"
+
+    report = materialize_collection(ledger, features, readiness)
+
+    assert features.exists() and readiness.exists()
+    assert report["event_grouping"]["manual_review_required"] is True
+    assert report["scientific_status"] == "manual-event-grouping-review-required"
+
+
 def test_freeze_study_uses_denominator_rosters_and_allocation_lineage(tmp_path):
     ledger = _prospective_two_cohort_collection(tmp_path)
     paths = {

@@ -140,7 +140,7 @@ python scripts/collect_external_cdms.py seal \
   --ledger data/new/collection.json
 ```
 
-A sealed collection can then produce disjoint outcome-blind feature files and complete denominator rosters. Events without scoreable rows remain in their assigned roster and therefore remain in later safety denominators.
+A sealed collection can then produce disjoint outcome-blind feature files and complete denominator rosters. Events without scoreable rows remain in their assigned roster and therefore remain in later safety denominators. Cohort materialization is refused when the event-grouping audit flags ambiguity; an audit-only snapshot without cohort outputs remains available so the flagged event IDs can be reviewed before any study is frozen.
 
 ```bash
 python scripts/collect_external_cdms.py snapshot \

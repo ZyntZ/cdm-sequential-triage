@@ -440,6 +440,16 @@ def materialize_collection(
         )
     features = outcome_blind_features(complete)
     report = readiness_report(complete)
+    grouping = report["event_grouping"]
+    if cohort_paths and grouping["manual_review_required"]:
+        flagged = ", ".join(
+            item["event_id"] for item in grouping["flags"][:10]
+        )
+        suffix = "" if grouping["flagged_events"] <= 10 else ", ..."
+        raise ValueError(
+            "Prospective cohort materialization is blocked by ambiguous event "
+            f"grouping ({grouping['flagged_events']} events: {flagged}{suffix})"
+        )
     report["collection"] = {
         "ledger_path": str(ledger_path.resolve()),
         "ledger_sha256": file_sha256(ledger_path),
