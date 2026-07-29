@@ -3598,6 +3598,81 @@ def test_russian_demo_localizes_operator_and_evidence_dashboards(tmp_path):
     assert "https://" not in evidence
 
 
+def test_run_demo_rejects_unsupported_locale_before_replay(tmp_path, monkeypatch):
+    import run_demo as demo_module
+    output = tmp_path / "invalid-locale-demo"
+    replay_called = False
+
+    def fail_if_called(*args, **kwargs):
+        nonlocal replay_called
+        replay_called = True
+        raise AssertionError("replay must not start for an unsupported locale")
+
+    monkeypatch.setattr(demo_module, "run_replay", fail_if_called)
+    with np.testing.assert_raises_regex(ValueError, "Unsupported locale"):
+        demo_module.run_demo(output, root=Path(__file__).resolve().parents[1], locale="xx")
+    assert replay_called is False
+    assert not output.exists()
+    assert not list(tmp_path.glob(".invalid-locale-demo.*"))
+
+
+def test_operator_dashboard_rejects_incomplete_audit_at_load_time(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(
+        json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n"
+    )
+    audit = dashboard_audit_frame(calibration).drop(columns="decision_window_eligible")
+    audit_path = tmp_path / "audit.parquet"
+    audit.to_parquet(audit_path, index=False)
+    output = tmp_path / "operator.html"
+
+    with np.testing.assert_raises_regex(ValueError, "decision_window_eligible"):
+        build_dashboard([audit_path], calibration, output)
+    assert not output.exists()
+
+
+def test_operator_dashboard_rejects_tampered_calibration_rule(tmp_path):
+    calibration = tmp_path / "calibration.json"
+    artifact = runtime_calibration_artifact(model_hash="c" * 64)
+    artifact["calibration"]["pac_bound"] = 0.9
+    calibration.write_text(json.dumps(artifact) + "\n")
+    audit_path = tmp_path / "audit.parquet"
+    dashboard_audit_frame(calibration).to_parquet(audit_path, index=False)
+    output = tmp_path / "operator.html"
+
+    with np.testing.assert_raises_regex(ValueError, "PAC bound"):
+        build_dashboard([audit_path], calibration, output)
+    assert not output.exists()
+
+
+def test_evidence_dashboard_rejects_hash_consistent_calibration_tampering(tmp_path):
+    import shutil
+    from confirmation import file_sha256
+
+    root = Path(__file__).resolve().parents[1]
+    copy_root = tmp_path / "copy"
+    shutil.copytree(root / "artifacts", copy_root / "artifacts")
+    shutil.copytree(root / "reports", copy_root / "reports")
+    calibration = copy_root / "artifacts" / "confirmation_v1" / "calibration.json"
+    artifact = json.loads(calibration.read_text(encoding="utf-8"))
+    artifact["calibration"]["pac_bound"] = 0.9
+    calibration.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
+    tampered_hash = file_sha256(calibration)
+    lock_path = copy_root / "artifacts" / "confirmation_v1" / "confirmation.lock"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock["calibration_artifact_sha256"] = tampered_hash
+    lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+    result_path = copy_root / "artifacts" / "confirmation_v1" / "confirmation.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["calibration_artifact_sha256"] = tampered_hash
+    result_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    output = tmp_path / "evidence.html"
+
+    with np.testing.assert_raises_regex(ValueError, "PAC bound"):
+        build_evidence_dashboard(copy_root, output)
+    assert not output.exists()
+
+
 def test_dashboards_reject_unsupported_locale(tmp_path):
     root = Path(__file__).resolve().parents[1]
     with np.testing.assert_raises(ValueError):

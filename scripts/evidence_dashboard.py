@@ -7,7 +7,7 @@ import pandas as pd
 import sys
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'src'))
-from confirmation import file_sha256, read_json
+from confirmation import file_sha256, read_json, validate_calibration_artifact
 
 def esc(x): return html.escape('—' if x is None else str(x),quote=True)
 def pct(x): return f"{100*float(x):.2f}%"
@@ -160,6 +160,7 @@ def localize_evidence_document(document: str, locale: str) -> str:
     return document
 
 def build_evidence_dashboard(root:Path,output:Path,locale:str="en")->dict[str,Any]:
+    if locale not in SUPPORTED_LOCALES: raise ValueError(f"Unsupported locale: {locale}")
     if output.exists(): raise FileExistsError(f"Evidence dashboard exists: {output}")
     a=root/'artifacts'; r=root/'reports'; c=a/'confirmation_v1'
     v10=read_json(a/'development_score_ensemble_v10.json'); v11=read_json(a/'development_score_ensemble_repeated_v11.json')
@@ -177,6 +178,7 @@ def build_evidence_dashboard(root:Path,output:Path,locale:str="en")->dict[str,An
     verify(c/'calibration.json',clock['calibration_artifact_sha256'],'confirmation calibration')
     verify(c/'evaluation_scores.parquet',clock['evaluation_scores_sha256'],'confirmation scores')
     if clock['calibration_artifact_sha256']!=conf['calibration_artifact_sha256'] or clock['evaluation_scores_sha256']!=conf['evaluation_scores_sha256']: raise ValueError('Confirmation lock/result mismatch')
+    validate_calibration_artifact(cal, conf.get('policy'))
     if v13['threshold'] is not None or v13['calibration_accessed'] is not False or v13['evaluation_accessed'] is not False: raise ValueError('v13 is not frozen before calibration')
     criterion=float(conf['policy']['alpha']); passed=float(conf['evaluation']['danger_ucb'])<=criterion
     devrows=''.join(f"<tr><td>{esc(x['method'])}</td><td>{x['danger_k']}/{x['danger_n']}</td><td>{pct(x['danger_ucb'])}</td><td>{pct(x['safe_negative_rate'])}</td><td>{'YES' if x['safety_feasible'] else 'NO'}</td><td>{'YES' if x['pareto_frontier'] else 'NO'}</td></tr>" for x in v10['summary'])

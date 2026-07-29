@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from operator_dashboard import build_dashboard
+from operator_dashboard import SUPPORTED_LOCALES
 from evidence_dashboard import build_evidence_dashboard
 from replay_scores import run_replay
 
@@ -63,6 +64,8 @@ def verify_demo_bundle(output_dir: Path) -> dict:
 
 def run_demo(output_dir: Path, root: Path = ROOT, locale: str = "en") -> dict:
     """Create a historical replay audit and console in a fresh external directory."""
+    if locale not in SUPPORTED_LOCALES:
+        raise ValueError(f"Unsupported locale: {locale}")
     output_dir = output_dir.resolve()
     protected = [root / "artifacts", root / "data", root / "src", root / "scripts"]
     if any(_inside(output_dir, path) for path in protected):

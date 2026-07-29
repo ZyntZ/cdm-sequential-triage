@@ -16,14 +16,17 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 import sys
 sys.path.insert(0, str(ROOT / "src"))
-from confirmation import file_sha256, read_json, validate_policy
+from confirmation import (
+    file_sha256, read_json, validate_calibration_artifact,
+)
 from triage import Decision, SequentialTriagePolicy
 
 DECISIONS = ("ESCALATE", "MONITOR", "SAFE-EXCLUDE")
 DECISION_CLASS = {"ESCALATE": "escalate", "MONITOR": "monitor", "SAFE-EXCLUDE": "safe"}
 REQUIRED = {
     "event_id", "sequence_number", "time_to_tca", "score", "decision", "reason",
-    "shift_score", "shift_gate_allowed", "eligible_history_count", "scores_sha256",
+    "shift_score", "shift_gate_allowed", "decision_window_eligible",
+    "eligible_history_count", "scores_sha256",
     "calibration_sha256", "model_sha256", "is_current_decision",
 }
 HASH_COLUMNS = (
@@ -278,6 +281,8 @@ def build_dashboard(
     max_chain_rows: int = 50,
     locale: str = "en",
 ) -> dict[str, Any]:
+    if locale not in SUPPORTED_LOCALES:
+        raise ValueError(f"Unsupported locale: {locale}")
     if output_path.exists():
         raise FileExistsError(f"Dashboard output already exists: {output_path}")
     if max_events < 1:
@@ -285,10 +290,7 @@ def build_dashboard(
     if max_chain_rows < 1:
         raise ValueError("max_chain_rows must be positive")
     calibration = read_json(calibration_path)
-    policy = validate_policy(calibration.get("policy"))
-    rule = calibration.get("calibration")
-    if not isinstance(rule, dict) or "threshold" not in rule:
-        raise ValueError("Calibration artifact has no threshold")
+    policy, rule = validate_calibration_artifact(calibration)
     audit = load_audits(audit_paths, calibration, calibration_path)
     chain_summary = None
     chain: list[dict[str, Any]] = []
