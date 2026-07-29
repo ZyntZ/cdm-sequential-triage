@@ -4424,3 +4424,84 @@ def test_v13_readiness_reports_unsealed_collection_as_blocking(tmp_path):
     assert result["collection"]["status"] == "collecting"
     assert result["collection"]["outcomes_accessed"] is False
 
+
+
+
+def _frozen_prospective_study(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    ledger = _prospective_two_cohort_collection(tmp_path)
+    outputs = {
+        "features_output": tmp_path / "all-features.parquet",
+        "readiness_output": tmp_path / "readiness.json",
+        "calibration_features": tmp_path / "calibration-features.parquet",
+        "evaluation_features": tmp_path / "evaluation-features.parquet",
+        "calibration_roster": tmp_path / "calibration-roster.parquet",
+        "evaluation_roster": tmp_path / "evaluation-roster.parquet",
+        "allocation_output": tmp_path / "allocation.json",
+    }
+    materialize_collection(ledger, **outputs)
+    study_manifest = tmp_path / "study.json"
+    study_lock = tmp_path / "study.lock"
+    freeze_study(
+        outputs["calibration_features"],
+        outputs["evaluation_features"],
+        root / "artifacts" / "next_validation_preregistration_v12.json",
+        root / "artifacts" / "next_validation_preregistration_v12.lock",
+        study_manifest,
+        study_lock,
+        calibration_roster=outputs["calibration_roster"],
+        evaluation_roster=outputs["evaluation_roster"],
+        allocation_manifest=outputs["allocation_output"],
+    )
+    return ledger, study_manifest, study_lock
+
+
+def test_v13_readiness_verifies_study_ledger_cross_binding(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    ledger, study_manifest, study_lock = _frozen_prospective_study(tmp_path)
+
+    result = check_v13_readiness(
+        root / "artifacts" / "next_validation_preregistration_v12.json",
+        root / "artifacts" / "next_validation_preregistration_v12.lock",
+        root / "artifacts" / "catboost_tail_aligned_final_v13.json",
+        root / "artifacts" / "catboost_tail_aligned_final_v13.cbm",
+        ledger=ledger,
+        study_manifest=study_manifest,
+        study_lock=study_lock,
+    )
+
+    assert result["ready_for_scientific_confirmation"] is True
+    assert result["failed_checks"] == []
+    frozen = next(
+        check for check in result["checks"] if check["name"] == "frozen_new_study"
+    )
+    assert frozen["passed"] is True
+    assert "bound to the supplied sealed ledger" in frozen["detail"]
+
+
+def test_v13_readiness_rejects_study_from_another_sealed_ledger(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    ledger_a, study_manifest, study_lock = _frozen_prospective_study(tmp_path / "a")
+    ledger_b, _, _ = _frozen_prospective_study(tmp_path / "b")
+    assert file_sha256(ledger_a) != file_sha256(ledger_b)
+
+    result = check_v13_readiness(
+        root / "artifacts" / "next_validation_preregistration_v12.json",
+        root / "artifacts" / "next_validation_preregistration_v12.lock",
+        root / "artifacts" / "catboost_tail_aligned_final_v13.json",
+        root / "artifacts" / "catboost_tail_aligned_final_v13.cbm",
+        ledger=ledger_b,
+        study_manifest=study_manifest,
+        study_lock=study_lock,
+    )
+
+    assert result["ready_for_scientific_confirmation"] is False
+    assert "frozen_new_study" in result["failed_checks"]
+    frozen = next(
+        check for check in result["checks"] if check["name"] == "frozen_new_study"
+    )
+    assert frozen["passed"] is False
+    assert frozen["detail"] == (
+        "new-study allocation is not bound to the supplied sealed ledger"
+    )

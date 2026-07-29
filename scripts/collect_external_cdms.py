@@ -148,17 +148,42 @@ def check_v13_readiness(
     else:
         try:
             study, _ = read_locked_study(study_manifest, study_lock)
+            preregistration_record = study.get("preregistration", {})
             study_ok = (
                 study.get("outcomes_accessed") is False
-                and study.get("preregistration", {}).get("sha256")
-                == preregistration_sha256
+                and preregistration_record.get("sha256") == preregistration_sha256
+                and preregistration_record.get("lock_sha256")
+                == _sha256(preregistration_lock)
             )
-            record(
-                "frozen_new_study",
-                study_ok,
-                "new disjoint study is frozen before outcome access" if study_ok
-                else "new-study manifest is not bound to v13 preregistration",
+            detail = (
+                "new disjoint study is frozen before outcome access"
+                if study_ok
+                else "new-study manifest is not bound to the v13 preregistration and lock"
             )
+            if study_ok and collection is not None:
+                allocation = study.get("allocation")
+                collection_allocation = collection.get("allocation")
+                binding_ok = (
+                    isinstance(allocation, dict)
+                    and isinstance(collection_allocation, dict)
+                    and allocation.get("collection_status") == "sealed"
+                    and allocation.get("outcomes_accessed") is False
+                    and allocation.get("ledger_sha256") == collection.get("ledger_sha256")
+                    and allocation.get("assignments_sha256")
+                    == collection_allocation.get("assignments_sha256")
+                    and allocation.get("rule") == collection_allocation.get("rule")
+                    and int(allocation.get("seed", -1))
+                    == int(collection_allocation.get("seed", -2))
+                    and float(allocation.get("calibration_fraction", -1.0))
+                    == float(collection_allocation.get("calibration_fraction", -2.0))
+                )
+                study_ok = binding_ok
+                detail = (
+                    "new disjoint study is frozen and bound to the supplied sealed ledger"
+                    if binding_ok
+                    else "new-study allocation is not bound to the supplied sealed ledger"
+                )
+            record("frozen_new_study", study_ok, detail)
         except Exception as error:
             record("frozen_new_study", False, f"new-study lock check failed: {error}")
 
