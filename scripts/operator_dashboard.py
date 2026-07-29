@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 import sys
 sys.path.insert(0, str(ROOT / "src"))
 from confirmation import file_sha256, read_json, validate_policy
-from triage import SequentialTriagePolicy
+from triage import Decision, SequentialTriagePolicy
 
 DECISIONS = ("ESCALATE", "MONITOR", "SAFE-EXCLUDE")
 DECISION_CLASS = {"ESCALATE": "escalate", "MONITOR": "monitor", "SAFE-EXCLUDE": "safe"}
@@ -34,6 +34,8 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _event_key(value: Any) -> str:
+    if isinstance(value, np.generic):
+        value = value.item()
     return f"{type(value).__name__}:{value}"
 
 
@@ -138,6 +140,8 @@ def localize_operator_document(document: str, locale: str) -> str:
         ("FROZEN POLICY", "ЗАМОРОЖЕННАЯ ПОЛИТИКА"),
         ("SAFE-EXCLUDE removes an event from the current manual-review queue while automated ingestion continues. It is not a maneuver command.", "SAFE-EXCLUDE исключает событие из текущей очереди ручного анализа, но автоматический приём новых CDM продолжается. Это не команда на манёвр."),
         ("EVENT DECISION TIMELINE", "ИСТОРИЯ РЕШЕНИЙ ПО СОБЫТИЮ"),
+        ("Decision explanation", "Объяснение решения"),
+        ("First SAFE-EXCLUDE", "Первый SAFE-EXCLUDE"),
         ("ARTIFACT LINEAGE", "ПРОИСХОЖДЕНИЕ АРТЕФАКТОВ"),
         ("Artifact", "Артефакт"), ("shift gate", "shift gate"),
         ("PROCESSED BATCH CHAIN", "ЦЕПОЧКА ОБРАБОТАННЫХ ПАКЕТОВ"),
@@ -158,6 +162,111 @@ def localize_operator_document(document: str, locale: str) -> str:
     for source, target in replacements:
         document = document.replace(source, target)
     return document
+
+
+REASON_EXPLANATIONS = {
+    "score_at_or_above_escalation_threshold": (
+        "Score reached the operational escalation threshold; manual review is required."
+    ),
+    "decision_window_not_open": (
+        "The event is earlier than the calibrated decision window; automated monitoring continues."
+    ),
+    "decision_window_closed": (
+        "The calibrated decision window has closed; SAFE-EXCLUDE is no longer permitted."
+    ),
+    "minimum_history_not_reached": (
+        "Too few CDM updates are available inside the decision window; monitoring continues."
+    ),
+    "safe_exclude_blocked_by_shift_gate": (
+        "The score crossed the safe threshold, but the applicability gate blocked SAFE-EXCLUDE."
+    ),
+    "score_at_or_below_calibrated_threshold": (
+        "The calibrated safe threshold, history rule, decision window, and applicability checks passed."
+    ),
+    "score_between_decision_thresholds": (
+        "The score did not cross a decision threshold; the event remains under monitoring."
+    ),
+}
+
+
+def explain_event_sequence(
+    event_id: Any,
+    audit: pd.DataFrame,
+    policy: dict[str, Any],
+    threshold: float,
+    escalation_threshold: float | None = None,
+) -> dict[str, Any]:
+    """Build a deterministic explanation from the accepted runtime audit only."""
+    required = {
+        "event_id", "sequence_number", "time_to_tca", "score", "decision",
+        "reason", "shift_score", "shift_gate_allowed",
+        "decision_window_eligible", "eligible_history_count",
+    }
+    missing = required.difference(audit.columns)
+    if missing:
+        raise ValueError(f"Audit is missing explanation columns: {sorted(missing)}")
+    event_key = _event_key(event_id)
+    keys = audit["event_id"].map(_event_key)
+    event = audit.loc[keys.eq(event_key)].sort_values(
+        "sequence_number", kind="mergesort"
+    )
+    if event.empty:
+        raise ValueError(f"Event is not present in the audit: {event_id!r}")
+    if event["sequence_number"].duplicated().any():
+        raise ValueError(f"Event has duplicate sequence numbers: {event_id!r}")
+
+    minimum_history = int(policy["minimum_history"])
+    min_days = float(policy["min_days_to_tca"])
+    max_days = float(policy["max_days_to_tca"])
+    safe_threshold = float(threshold)
+    steps = []
+    for row in event.itertuples(index=False):
+        reason = str(row.reason)
+        if reason not in REASON_EXPLANATIONS:
+            raise ValueError(f"Unsupported runtime decision reason: {reason}")
+        shift_score = None
+        if row.shift_score is not None and not pd.isna(row.shift_score):
+            shift_score = float(row.shift_score)
+        steps.append({
+            "sequence_number": int(row.sequence_number),
+            "time_to_tca": float(row.time_to_tca),
+            "score": float(row.score),
+            "decision": str(row.decision),
+            "reason": reason,
+            "eligible_history_count": int(row.eligible_history_count),
+            "shift_gate_allowed": bool(row.shift_gate_allowed),
+            "shift_score": shift_score,
+            "decision_window_eligible": bool(row.decision_window_eligible),
+            "history_sufficient": int(row.eligible_history_count) >= minimum_history,
+            "score_at_or_below_safe_threshold": float(row.score) <= safe_threshold,
+            "score_at_or_above_escalation_threshold": (
+                False if escalation_threshold is None
+                else float(row.score) >= float(escalation_threshold)
+            ),
+            "explanation": REASON_EXPLANATIONS[reason],
+        })
+    safe_steps = [
+        step for step in steps if step["decision"] == Decision.SAFE_EXCLUDE.value
+    ]
+    return {
+        "event_id": event_id,
+        "total_updates": len(steps),
+        "current_decision": steps[-1]["decision"],
+        "first_safe_exclude_sequence": (
+            None if not safe_steps else safe_steps[0]["sequence_number"]
+        ),
+        "first_safe_exclude_tca": (
+            None if not safe_steps else safe_steps[0]["time_to_tca"]
+        ),
+        "policy": {
+            "safe_threshold": safe_threshold,
+            "escalation_threshold": escalation_threshold,
+            "minimum_history": minimum_history,
+            "min_days_to_tca": min_days,
+            "max_days_to_tca": max_days,
+        },
+        "steps": steps,
+    }
 
 def build_dashboard(
     audit_paths: list[Path],
@@ -234,11 +343,35 @@ def build_dashboard(
     selected = set(shown["__event_key"])
     for key, frame in audit[audit["__event_key"].isin(selected)].groupby("__event_key", sort=False):
         frame = frame.sort_values("sequence_number")
-        timelines.append({"key": key, "label": str(frame.iloc[-1]["event_id"]), "updates": [
-            {"sequence": int(r.sequence_number), "tca": float(r.time_to_tca), "score": float(r.score),
-             "decision": str(r.decision), "reason": str(r.reason), "history": int(r.eligible_history_count),
-             "gate": bool(r.shift_gate_allowed)} for r in frame.itertuples(index=False)
-        ]})
+        event_id = frame.iloc[-1]["event_id"]
+        explanation = explain_event_sequence(
+            event_id, frame, policy, float(rule["threshold"]),
+            escalation_threshold=(
+                None
+                if "escalation_threshold" not in frame
+                or frame["escalation_threshold"].dropna().empty
+                else float(frame["escalation_threshold"].dropna().iloc[0])
+            ),
+        )
+        timelines.append({
+            "key": key,
+            "label": str(event_id),
+            "first_safe_sequence": explanation["first_safe_exclude_sequence"],
+            "first_safe_tca": explanation["first_safe_exclude_tca"],
+            "updates": [
+                {
+                    "sequence": step["sequence_number"],
+                    "tca": step["time_to_tca"],
+                    "score": step["score"],
+                    "decision": step["decision"],
+                    "reason": step["reason"],
+                    "history": step["eligible_history_count"],
+                    "gate": step["shift_gate_allowed"],
+                    "explanation": step["explanation"],
+                }
+                for step in explanation["steps"]
+            ],
+        })
     timeline_json = json.dumps(timelines, ensure_ascii=False).replace("</", "<\\/")
 
     confirmation_html = ""
@@ -322,10 +455,10 @@ def build_dashboard(
 <section class='panel summary'><div class='panel-title'>CURRENT RUNTIME STATE</div><div class='kpis'><div class='kpi'><span>Active events</span><strong>{events}</strong><small>across {len(audit_paths)} batch(es)</small></div><div class='kpi'><span>Processed updates</span><strong>{updates}</strong><small>message-level count</small></div>{cards}{chain_card}</div><div class='source'>gate: {'active · '+str(audit.loc[blocked,'__event_key'].nunique())+' events blocked' if gate_active else 'not active'} · showing {len(shown)} of {events} events</div></section>
 <section class='panel active'><div class='panel-title'>ACTIVE EVENT QUEUE</div><div class='table-wrap'><table><thead><tr><th>Event</th><th>Current decision</th><th>Score</th><th>TCA, d</th><th>Seq</th><th>History</th><th>Gate</th><th>Reason</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>
 <section class='panel policy'><div class='panel-title'>FROZEN POLICY</div><table>{policy_rows}</table><p class='caveat'>SAFE-EXCLUDE removes an event from the current manual-review queue while automated ingestion continues. It is not a maneuver command.</p></section>
-<section class='panel timeline'><div class='panel-title'>EVENT DECISION TIMELINE</div><select id='event-select'></select><div id='timeline' class='timeline-grid'></div></section>
+<section class='panel timeline'><div class='panel-title'>EVENT DECISION TIMELINE</div><select id='event-select'></select><div id='event-summary' class='source'></div><div id='timeline' class='timeline-grid'></div></section>
 <section class='panel lineage'><div class='panel-title'>ARTIFACT LINEAGE</div><table><thead><tr><th>Artifact</th><th>SHA-256</th></tr></thead><tbody>{lineage}</tbody></table><div class='source'>model {_escape(calibration.get('model_sha256'))}<br>shift gate {_escape(calibration.get('shift_gate_sha256'))}</div></section>{chain_table_html}{confirmation_html}</div>
 <footer>Dataset: ESA Collision Avoidance Challenge, Zenodo 10.5281/zenodo.4463683, CC BY 4.0. Target is high final calculated collision probability, not collision occurrence. Statistical control requires event-level exchangeability and is not an operational guarantee under arbitrary distribution shift.</footer>
-<script>const events={timeline_json};const select=document.getElementById('event-select'),timeline=document.getElementById('timeline');function esc(s){{return String(s).replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));}}for(const e of events){{const o=document.createElement('option');o.value=e.key;o.textContent=e.label;select.appendChild(o);}}function render(){{const e=events.find(x=>x.key===select.value)||events[0];timeline.innerHTML='';if(!e)return;for(const u of e.updates){{const d=document.createElement('div');d.className='step';d.innerHTML=`<strong>${{esc(u.decision)}}</strong><span>seq ${{u.sequence}} · TCA ${{u.tca.toFixed(3)}} d</span><span>score ${{u.score.toPrecision(5)}} · history ${{u.history}}</span><span>${{esc(u.reason)}} · gate ${{u.gate?'ALLOW':'BLOCK'}}</span>`;timeline.appendChild(d);}}}}select.addEventListener('change',render);render();</script></main></body></html>"""
+<script>const events={timeline_json};const select=document.getElementById('event-select'),timeline=document.getElementById('timeline'),eventSummary=document.getElementById('event-summary');function esc(s){{return String(s).replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));}}for(const e of events){{const o=document.createElement('option');o.value=e.key;o.textContent=e.label;select.appendChild(o);}}function render(){{const e=events.find(x=>x.key===select.value)||events[0];timeline.innerHTML='';eventSummary.textContent='';if(!e)return;eventSummary.textContent=e.first_safe_sequence===null?'First SAFE-EXCLUDE: none':`First SAFE-EXCLUDE: seq ${{e.first_safe_sequence}} · TCA ${{e.first_safe_tca.toFixed(3)}} d`;for(const u of e.updates){{const d=document.createElement('div');d.className='step';d.innerHTML=`<strong>${{esc(u.decision)}}</strong><span>seq ${{u.sequence}} · TCA ${{u.tca.toFixed(3)}} d</span><span>score ${{u.score.toPrecision(5)}} · history ${{u.history}}</span><span>${{esc(u.reason)}} · gate ${{u.gate?'ALLOW':'BLOCK'}}</span><span><b>Decision explanation:</b> ${{esc(u.explanation)}}</span>`;timeline.appendChild(d);}}}}select.addEventListener('change',render);render();</script></main></body></html>"""
     document = localize_operator_document(document, locale)
     _atomic_write(output_path, document)
     return {"updates": updates, "events": events, "current_decisions": {d: int(counts.get(d,0)) for d in DECISIONS}, "gate_active": bool(gate_active), "shown_events": len(shown), "chain": chain_summary, "confirmation": confirmation_summary, "locale": locale}

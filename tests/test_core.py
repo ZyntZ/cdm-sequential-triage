@@ -31,7 +31,9 @@ from replay_scores import (
     load_runtime, replay_scores, run_replay, validate_runtime_continuation,
     validate_score_stream,
 )
-from operator_dashboard import build_dashboard, current_events, load_audits
+from operator_dashboard import (
+    build_dashboard, current_events, explain_event_sequence, load_audits,
+)
 from evidence_dashboard import build_evidence_dashboard
 from run_demo import run_demo, verify_demo_bundle
 from confirm_policy import calibration_command, confirmation_command
@@ -2797,6 +2799,65 @@ def dashboard_audit_frame(calibration_path, event_id="event", decision="MONITOR"
     })
 
 
+def test_event_explanation_tracks_first_safe_exclude():
+    audit = pd.DataFrame({
+        "event_id": ["event"] * 4,
+        "sequence_number": [1, 2, 3, 4],
+        "time_to_tca": [8.0, 7.0, 6.0, 5.0],
+        "score": [0.10, 0.10, 0.10, 0.30],
+        "decision": ["MONITOR", "MONITOR", "SAFE-EXCLUDE", "MONITOR"],
+        "reason": [
+            "decision_window_not_open", "minimum_history_not_reached",
+            "score_at_or_below_calibrated_threshold",
+            "score_between_decision_thresholds",
+        ],
+        "shift_score": [np.nan] * 4,
+        "shift_gate_allowed": [True] * 4,
+        "decision_window_eligible": [False, True, True, True],
+        "eligible_history_count": [0, 1, 3, 4],
+    })
+    policy = {"minimum_history": 3, "min_days_to_tca": 2.0, "max_days_to_tca": 7.0}
+    result = explain_event_sequence("event", audit, policy, threshold=0.20)
+    assert result["total_updates"] == 4
+    assert result["current_decision"] == "MONITOR"
+    assert result["first_safe_exclude_sequence"] == 3
+    assert result["first_safe_exclude_tca"] == 6.0
+    assert result["steps"][0]["decision_window_eligible"] is False
+    assert result["steps"][1]["history_sufficient"] is False
+    assert result["steps"][2]["score_at_or_below_safe_threshold"] is True
+    assert "calibrated safe threshold" in result["steps"][2]["explanation"]
+
+
+def test_event_explanation_reports_shift_gate_block():
+    audit = pd.DataFrame({
+        "event_id": [1], "sequence_number": [3], "time_to_tca": [5.0],
+        "score": [0.10], "decision": ["MONITOR"],
+        "reason": ["safe_exclude_blocked_by_shift_gate"],
+        "shift_score": [4.2], "shift_gate_allowed": [False],
+        "decision_window_eligible": [True], "eligible_history_count": [3],
+    })
+    policy = {"minimum_history": 3, "min_days_to_tca": 2.0, "max_days_to_tca": 7.0}
+    step = explain_event_sequence(1, audit, policy, threshold=0.20)["steps"][0]
+    assert step["score_at_or_below_safe_threshold"] is True
+    assert step["shift_gate_allowed"] is False
+    assert step["shift_score"] == 4.2
+    assert "applicability gate blocked" in step["explanation"]
+
+
+def test_event_explanation_rejects_unknown_event_and_reason():
+    audit = pd.DataFrame({
+        "event_id": ["known"], "sequence_number": [1], "time_to_tca": [5.0],
+        "score": [0.3], "decision": ["MONITOR"], "reason": ["unknown_reason"],
+        "shift_score": [np.nan], "shift_gate_allowed": [True],
+        "decision_window_eligible": [True], "eligible_history_count": [1],
+    })
+    policy = {"minimum_history": 1, "min_days_to_tca": 2.0, "max_days_to_tca": 7.0}
+    with np.testing.assert_raises_regex(ValueError, "not present"):
+        explain_event_sequence("missing", audit, policy, threshold=0.20)
+    with np.testing.assert_raises_regex(ValueError, "Unsupported runtime decision reason"):
+        explain_event_sequence("known", audit, policy, threshold=0.20)
+
+
 def test_operator_dashboard_builds_self_contained_html(tmp_path):
     calibration = tmp_path / "calibration.json"
     calibration.write_text(json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n")
@@ -2811,6 +2872,8 @@ def test_operator_dashboard_builds_self_contained_html(tmp_path):
     assert summary["current_decisions"]["SAFE-EXCLUDE"] == 1
     assert "Operator Console" in document
     assert "SAFE-EXCLUDE" in document
+    assert "Decision explanation" in document
+    assert "The score did not cross a decision threshold" in document
     assert "c" * 64 in document
     assert "https://" not in document
 
