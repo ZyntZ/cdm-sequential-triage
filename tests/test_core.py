@@ -33,7 +33,7 @@ from replay_scores import (
 )
 from operator_dashboard import build_dashboard, current_events, load_audits
 from evidence_dashboard import build_evidence_dashboard
-from run_demo import run_demo
+from run_demo import run_demo, verify_demo_bundle
 from confirm_policy import calibration_command, confirmation_command
 from audit_external_cdms import audit_external_export
 from external_collection import (
@@ -3095,10 +3095,53 @@ def test_one_command_demo_builds_verified_outputs(tmp_path):
     assert stored["evidence_dashboard"] == "evidence-dashboard.html"
     assert stored["evidence"]["confirmation_passed"] is False
     assert stored["batch_chain"] == summary["batch_chain"]
+    assert stored["bundle_verification"]["status"] == "VERIFIED"
+    assert set(stored["bundle_verification"]["artifacts"]) == {
+        "replay-audit.parquet", "operator-console.html",
+        "runtime-state.json", "evidence-dashboard.html",
+    }
+    assert all(
+        len(digest) == 64
+        for digest in stored["bundle_verification"]["artifacts"].values()
+    )
+    verified = verify_demo_bundle(output)
+    assert verified["status"] == "VERIFIED"
+    assert verified["artifacts"] == stored["bundle_verification"]["artifacts"]
     console = (output / "operator-console.html").read_text(encoding="utf-8")
     assert "NOT MET" in console
     assert "Batch chain" in console
     assert "VERIFIED" in console
+
+
+def test_demo_bundle_verification_rejects_tampered_artifact(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    output = tmp_path / "historical-demo"
+    run_demo(output, root=root)
+    console = output / "operator-console.html"
+    console.write_text(
+        console.read_text(encoding="utf-8") + "\n<!-- tampered -->\n",
+        encoding="utf-8",
+    )
+
+    with np.testing.assert_raises_regex(
+        ValueError, "operator-console.html"
+    ):
+        verify_demo_bundle(output)
+
+
+def test_demo_bundle_verification_rejects_incomplete_digest_roster(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    output = tmp_path / "historical-demo"
+    run_demo(output, root=root)
+    summary_path = output / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["bundle_verification"]["artifacts"].pop("runtime-state.json")
+    summary_path.write_text(json.dumps(summary) + "\n", encoding="utf-8")
+
+    with np.testing.assert_raises_regex(
+        ValueError, "invalid artifact digest roster"
+    ):
+        verify_demo_bundle(output)
 
 
 def test_one_command_demo_refuses_protected_and_nonempty_output(tmp_path):

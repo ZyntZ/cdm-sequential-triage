@@ -15,6 +15,9 @@ from operator_dashboard import build_dashboard
 from evidence_dashboard import build_evidence_dashboard
 from replay_scores import run_replay
 
+sys.path.insert(0, str(ROOT / "src"))
+from confirmation import file_sha256
+
 
 def _inside(child: Path, parent: Path) -> bool:
     try:
@@ -23,6 +26,40 @@ def _inside(child: Path, parent: Path) -> bool:
     except ValueError:
         return False
 
+
+
+DEMO_ARTIFACTS = (
+    "replay-audit.parquet",
+    "operator-console.html",
+    "runtime-state.json",
+    "evidence-dashboard.html",
+)
+
+
+def verify_demo_bundle(output_dir: Path) -> dict:
+    """Verify the generated demo against the digests stored in summary.json."""
+    output_dir = output_dir.resolve()
+    summary_path = output_dir / "summary.json"
+    if not summary_path.exists():
+        raise FileNotFoundError(f"Demo summary is missing: {summary_path}")
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    expected = summary.get("bundle_verification", {}).get("artifacts")
+    if not isinstance(expected, dict) or set(expected) != set(DEMO_ARTIFACTS):
+        raise ValueError("Demo summary has an invalid artifact digest roster")
+    verified = {}
+    for name in DEMO_ARTIFACTS:
+        path = output_dir / name
+        if not path.is_file():
+            raise FileNotFoundError(f"Demo artifact is missing: {path}")
+        actual = file_sha256(path)
+        if actual != expected[name]:
+            raise ValueError(f"Demo artifact SHA-256 mismatch: {name}")
+        verified[name] = actual
+    return {
+        "status": "VERIFIED",
+        "artifacts": verified,
+        "summary": "summary.json",
+    }
 
 def run_demo(output_dir: Path, root: Path = ROOT, locale: str = "en") -> dict:
     """Create a historical replay audit and console in a fresh external directory."""
@@ -58,8 +95,16 @@ def run_demo(output_dir: Path, root: Path = ROOT, locale: str = "en") -> dict:
             locale=locale,
         )
         evidence = build_evidence_dashboard(root, evidence_path, locale=locale)
+        bundle_artifacts = {
+            path.name: file_sha256(path)
+            for path in (audit_path, console_path, checkpoint_path, evidence_path)
+        }
         summary = {
             "status": "historical-demo-not-for-operations",
+            "bundle_verification": {
+                "status": "VERIFIED",
+                "artifacts": bundle_artifacts,
+            },
             "locale": locale,
             "output_directory": str(output_dir),
             "audit": "replay-audit.parquet",
@@ -88,6 +133,9 @@ def run_demo(output_dir: Path, root: Path = ROOT, locale: str = "en") -> dict:
             output_dir.rmdir()
         staging.replace(output_dir)
         staging = None
+        verified = verify_demo_bundle(output_dir)
+        if verified["artifacts"] != summary["bundle_verification"]["artifacts"]:
+            raise ValueError("Published demo bundle verification changed after commit")
         return summary
     finally:
         if staging is not None:
