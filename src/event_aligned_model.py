@@ -19,6 +19,42 @@ DYNAMIC_NUMERIC_FEATURES = tuple(dict.fromkeys(NUMERIC_FEATURES + PREFIX_FEATURE
 DYNAMIC_FEATURES = DYNAMIC_NUMERIC_FEATURES + CATEGORICAL_FEATURES
 
 
+def validate_dynamic_feature_contract(
+    model: CatBoostClassifier,
+    manifest_features: list[str] | tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    """Require code, model binary, and optional manifest to use one feature contract."""
+    expected = tuple(DYNAMIC_FEATURES)
+    model_features = tuple(str(value) for value in model.feature_names_)
+    if not model_features:
+        raise ValueError("Model binary does not contain feature names")
+    if len(model_features) != len(set(model_features)):
+        raise ValueError("Model binary contains duplicate feature names")
+    if model_features != expected:
+        missing = sorted(set(expected).difference(model_features))
+        extra = sorted(set(model_features).difference(expected))
+        raise ValueError(
+            "Model feature contract does not match DYNAMIC_FEATURES "
+            f"(missing={missing}, extra={extra}, order_match=False)"
+        )
+    if manifest_features is not None:
+        if not isinstance(manifest_features, (list, tuple)):
+            raise ValueError("Manifest features must be an ordered list")
+        manifest_contract = tuple(str(value) for value in manifest_features)
+        if len(manifest_contract) != len(set(manifest_contract)):
+            raise ValueError("Manifest contains duplicate feature names")
+        if manifest_contract != expected:
+            missing = sorted(set(expected).difference(manifest_contract))
+            extra = sorted(set(manifest_contract).difference(expected))
+            raise ValueError(
+                "Manifest feature contract does not match DYNAMIC_FEATURES "
+                f"(missing={missing}, extra={extra}, order_match=False)"
+            )
+        if manifest_contract != model_features:
+            raise ValueError("Model and manifest feature contracts do not match")
+    return expected
+
+
 def prepare_dynamic_frame(
     frame: pd.DataFrame, require_labels: bool = True
 ) -> pd.DataFrame:
@@ -114,6 +150,7 @@ def fit_dynamic_model(
 
 
 def score_dynamic_model(model: CatBoostClassifier, prepared: pd.DataFrame) -> np.ndarray:
+    validate_dynamic_feature_contract(model)
     scores = model.predict_proba(prepared[list(DYNAMIC_FEATURES)])[:, 1]
     if not np.isfinite(scores).all():
         raise ValueError("Model produced non-finite scores")

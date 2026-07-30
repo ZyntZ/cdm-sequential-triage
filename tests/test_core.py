@@ -10,7 +10,9 @@ from history_gate_diagnostics import (
 )
 from event_aligned_diagnostics import attach_event_folds
 from event_aligned_model import (
-    fit_dynamic_model, positive_tail_weights, prepare_dynamic_frame, score_dynamic_frame,
+    DYNAMIC_FEATURES, fit_dynamic_model, positive_tail_weights,
+    prepare_dynamic_frame, score_dynamic_frame, score_dynamic_model,
+    validate_dynamic_feature_contract,
 )
 from external_cdm import (
     REQUIRED_EXTERNAL_FEATURES, adapt_external_cdms, derive_event_labels,
@@ -2342,6 +2344,84 @@ def tail_manifest():
             "decision_window_days": [2.0, 7.0],
         },
     }
+
+
+def test_v13_feature_contract_matches_code_manifest_and_model():
+    from catboost import CatBoostClassifier
+
+    root = Path(__file__).resolve().parents[1]
+    manifest = json.loads(
+        (root / "artifacts" / "catboost_tail_aligned_final_v13.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    model = CatBoostClassifier()
+    model.load_model(
+        str(root / "artifacts" / "catboost_tail_aligned_final_v13.cbm")
+    )
+
+    contract = validate_dynamic_feature_contract(model, manifest["features"])
+    assert contract == DYNAMIC_FEATURES
+    assert list(contract) == manifest["features"]
+    assert list(contract) == model.feature_names_
+    assert len(contract) == 45
+
+
+def test_dynamic_scoring_rejects_model_feature_contract_drift():
+    training = snapshot_training_frame()
+    prepared = prepare_dynamic_frame(training)
+    model = fit_dynamic_model(
+        prepared, event_equal_weights(prepared), {"iterations": 5}
+    )
+    model.set_feature_names(list(reversed(model.feature_names_)))
+
+    with np.testing.assert_raises_regex(ValueError, "Model feature contract"):
+        score_dynamic_model(model, prepared)
+
+
+def test_manifest_feature_contract_rejects_order_and_membership_drift():
+    from catboost import CatBoostClassifier
+
+    root = Path(__file__).resolve().parents[1]
+    model = CatBoostClassifier()
+    model.load_model(
+        str(root / "artifacts" / "catboost_tail_aligned_final_v13.cbm")
+    )
+    reordered = list(DYNAMIC_FEATURES)
+    reordered[0], reordered[1] = reordered[1], reordered[0]
+    with np.testing.assert_raises_regex(ValueError, "Manifest feature contract"):
+        validate_dynamic_feature_contract(model, reordered)
+    missing = list(DYNAMIC_FEATURES[:-1])
+    with np.testing.assert_raises_regex(ValueError, "Manifest feature contract"):
+        validate_dynamic_feature_contract(model, missing)
+
+
+def test_tail_score_file_rejects_manifest_feature_contract_drift(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    manifest = json.loads(
+        (root / "artifacts" / "catboost_tail_aligned_final_v13.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    manifest["features"][0], manifest["features"][1] = (
+        manifest["features"][1], manifest["features"][0]
+    )
+    manifest_path = tmp_path / "model.json"
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    features_path = tmp_path / "features.parquet"
+    snapshot_training_frame(500).drop(columns="y").to_parquet(
+        features_path, index=False
+    )
+    output_path = tmp_path / "scores.parquet"
+
+    with np.testing.assert_raises_regex(ValueError, "Manifest feature contract"):
+        score_tail_file(
+            features_path,
+            root / "artifacts" / "catboost_tail_aligned_final_v13.cbm",
+            manifest_path,
+            output_path,
+        )
+    assert not output_path.exists()
 
 
 def test_dynamic_scoring_is_label_blind_and_returns_confirmation_columns():
