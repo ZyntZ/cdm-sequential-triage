@@ -640,6 +640,44 @@ def test_ledger_lock_is_released_after_exception(tmp_path):
         assert (tmp_path / "collection.json.lock").exists()
 
 
+def test_ledger_lock_uses_windows_byte_range_lock(monkeypatch, tmp_path):
+    import external_collection as collection_module
+
+    calls = []
+
+    class FakeMsvcrt:
+        LK_LOCK = 1
+        LK_UNLCK = 2
+
+        @staticmethod
+        def locking(file_descriptor, mode, length):
+            calls.append((file_descriptor, mode, length))
+
+    monkeypatch.setattr(collection_module, "fcntl", None)
+    monkeypatch.setattr(collection_module, "msvcrt", FakeMsvcrt)
+
+    ledger = tmp_path / "collection.json"
+    with collection_module.ledger_lock(ledger):
+        lock_path = tmp_path / "collection.json.lock"
+        assert lock_path.read_bytes() == b"\0"
+        assert calls[-1][1:] == (FakeMsvcrt.LK_LOCK, 1)
+
+    assert [call[1:] for call in calls] == [
+        (FakeMsvcrt.LK_LOCK, 1),
+        (FakeMsvcrt.LK_UNLCK, 1),
+    ]
+
+
+def test_ledger_lock_rejects_platform_without_locking_api(monkeypatch, tmp_path):
+    import external_collection as collection_module
+
+    monkeypatch.setattr(collection_module, "fcntl", None)
+    monkeypatch.setattr(collection_module, "msvcrt", None)
+    with np.testing.assert_raises_regex(RuntimeError, "unavailable on this platform"):
+        with collection_module.ledger_lock(tmp_path / "collection.json"):
+            pass
+
+
 def test_external_collection_verifies_source_and_batch_lineage(tmp_path):
     source = write_external_export(tmp_path / "source.json", [
         external_cdm_record("m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z")
@@ -1641,6 +1679,18 @@ def test_validation_design_summary_matches_frozen_v13_claims():
     assert 0.79 < design["evaluation"]["pass_probability_at_assumed_rate"] < 0.80
 
 
+def test_validation_design_summary_uses_separate_confidence_levels():
+    design = validation_design_summary(
+        100, 200,
+        calibration_confidence=0.90,
+        evaluation_confidence=0.99,
+    )
+
+    assert design["calibration"]["confidence"] == 0.90
+    assert design["evaluation"]["confidence"] == 0.99
+    assert design["evaluation"]["maximum_passing_dangerous_exclusions"] < 12
+
+
 def test_evaluation_planning_table_is_monotone_in_true_risk():
     table = evaluation_planning_table(positive_counts=(100, 200))
     assert table["positive_events"].tolist() == [100, 200]
@@ -2292,16 +2342,18 @@ def test_complete_rosters_keep_events_without_eligible_prefixes():
 
 
 
-def tail_manifest():
+def tail_manifest(model_sha256="a" * 64, evaluation_confidence=0.95):
     return {
         "score_column": "catboost_tail_aligned",
         "candidate": {
             "alpha": 0.10,
             "calibration_confidence": 0.95,
+            "evaluation_confidence": evaluation_confidence,
             "calibration_mode": "pac",
             "minimum_history": 3,
             "decision_window_days": [2.0, 7.0],
         },
+        "outputs": {"model": {"sha256": model_sha256}},
     }
 
 
@@ -2337,6 +2389,47 @@ def test_label_blind_tail_scores_can_be_calibrated_with_separate_labels():
     calibration = calibrate(scores, labels, policy=policy)
     assert calibration["policy"] == policy
     assert calibration["calibration"]["n_positive"] == 40
+
+
+def test_tail_calibration_rejects_scores_from_another_model():
+    model_sha256 = "a" * 64
+    manifest = tail_manifest(model_sha256=model_sha256)
+    policy = policy_from_model_manifest(manifest)
+    scores = confirmation_scores().rename(
+        columns={"catboost_snapshot": "catboost_tail_aligned"}
+    ).drop(columns="y")
+    labels = confirmation_scores().loc[:, ["event_id", "y"]].drop_duplicates()
+
+    with np.testing.assert_raises_regex(ValueError, "does not match the model manifest"):
+        calibrate(
+            scores, labels, policy=policy, model_manifest=manifest,
+        )
+
+    scores["model_sha256"] = model_sha256
+    artifact = calibrate(
+        scores, labels, policy=policy, model_manifest=manifest,
+    )
+    assert artifact["model_sha256"] == model_sha256
+
+
+def test_tail_evaluation_uses_frozen_evaluation_confidence():
+    policy = policy_from_model_manifest(tail_manifest(evaluation_confidence=0.99))
+    calibration_scores = confirmation_scores().rename(
+        columns={"catboost_snapshot": "catboost_tail_aligned"}
+    )
+    calibration = calibrate(calibration_scores, policy=policy)
+    evaluation_scores = confirmation_scores(event_offset=100).rename(
+        columns={"catboost_snapshot": "catboost_tail_aligned"}
+    )
+
+    default_result = evaluate(evaluation_scores, calibration, policy=policy)
+    frozen_result = evaluate(
+        evaluation_scores, calibration, policy=policy,
+        evaluation_confidence=0.99,
+    )
+
+    assert frozen_result["evaluation"]["evaluation_confidence"] == 0.99
+    assert frozen_result["evaluation"]["danger_ucb"] > default_result["evaluation"]["danger_ucb"]
 
 
 def test_tail_confirmation_requires_the_same_frozen_policy():
@@ -3079,6 +3172,43 @@ def test_confirmation_preflight_rejects_tampered_rule_before_lock(tmp_path):
     )
 
     with np.testing.assert_raises(ValueError):
+        _confirmation_preflight(args, artifact)
+
+
+def test_confirmation_preflight_rejects_manifest_model_mismatch(tmp_path):
+    import argparse
+
+    model_sha256 = "a" * 64
+    manifest = tail_manifest(model_sha256=model_sha256)
+    manifest_path = tmp_path / "model.json"
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+    policy = policy_from_model_manifest(manifest)
+    calibration_scores = confirmation_scores().rename(
+        columns={"catboost_snapshot": "catboost_tail_aligned"}
+    )
+    calibration_scores["model_sha256"] = model_sha256
+    artifact = calibrate(
+        calibration_scores, policy=policy, model_manifest=manifest,
+    )
+    artifact["model_manifest_sha256"] = file_sha256(manifest_path)
+    artifact["study_manifest_sha256"] = None
+
+    evaluation_scores = confirmation_scores(event_offset=100).rename(
+        columns={"catboost_snapshot": "catboost_tail_aligned"}
+    ).drop(columns="y")
+    evaluation_scores["model_sha256"] = "b" * 64
+    scores_path = tmp_path / "evaluation.parquet"
+    evaluation_scores.to_parquet(scores_path, index=False)
+    args = argparse.Namespace(
+        scores=scores_path,
+        gate=None,
+        model_manifest=manifest_path,
+        study_manifest=None,
+        study_lock=None,
+    )
+
+    with np.testing.assert_raises_regex(ValueError, "different models"):
         _confirmation_preflight(args, artifact)
 
 

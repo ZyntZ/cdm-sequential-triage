@@ -100,15 +100,20 @@ def validation_design_summary(
     evaluation_positive_events: int,
     *,
     alpha: float = 0.10,
-    confidence: float = 0.95,
+    calibration_confidence: float = 0.95,
+    evaluation_confidence: float = 0.95,
     assumed_true_danger_rate: float = 0.05,
 ) -> dict:
-    """Compute the frozen calibration and evaluation design claims."""
+    """Compute calibration and evaluation claims at their frozen confidence levels."""
     calibration = calibration_design(
-        calibration_positive_events, alpha=alpha, confidence=confidence
+        calibration_positive_events,
+        alpha=alpha,
+        confidence=calibration_confidence,
     )
     maximum_failures = maximum_passing_failures(
-        evaluation_positive_events, alpha=alpha, confidence=confidence
+        evaluation_positive_events,
+        alpha=alpha,
+        confidence=evaluation_confidence,
     )
     return {
         "calibration": calibration,
@@ -117,17 +122,21 @@ def validation_design_summary(
             "maximum_passing_dangerous_exclusions": int(maximum_failures),
             "upper_bound_at_maximum": (
                 None if maximum_failures < 0
-                else cp_upper(maximum_failures, evaluation_positive_events, confidence)
+                else cp_upper(
+                    maximum_failures,
+                    evaluation_positive_events,
+                    evaluation_confidence,
+                )
             ),
             "assumed_true_danger_rate": float(assumed_true_danger_rate),
             "pass_probability_at_assumed_rate": pass_probability(
                 evaluation_positive_events,
                 assumed_true_danger_rate,
                 alpha=alpha,
-                confidence=confidence,
+                confidence=evaluation_confidence,
             ),
             "alpha": float(alpha),
-            "confidence": float(confidence),
+            "confidence": float(evaluation_confidence),
         },
     }
 

@@ -16,7 +16,9 @@ from confirmation import (
     attach_event_labels,
     calibrate,
     evaluate,
+    evaluation_confidence_from_model_manifest,
     file_sha256,
+    model_sha256_from_manifest,
     policy_from_model_manifest,
     read_json,
     validate_calibration_artifact,
@@ -67,7 +69,10 @@ def calibration_command(args: argparse.Namespace) -> None:
         if study_hash is None:
             raise ValueError("The frozen model requires a locked genuinely new study")
     policy = None if manifest is None else policy_from_model_manifest(manifest)
-    artifact = calibrate(prefixes, labels, shift_gate=shift_gate, policy=policy)
+    artifact = calibrate(
+        prefixes, labels, shift_gate=shift_gate, policy=policy,
+        model_manifest=manifest,
+    )
     artifact["model_manifest_sha256"] = (
         None if args.model_manifest is None else file_sha256(args.model_manifest)
     )
@@ -129,6 +134,10 @@ def _confirmation_preflight(
             raise ValueError("The frozen model requires a locked genuinely new study")
         if policy_from_model_manifest(manifest) != artifact.get("policy"):
             raise ValueError("Calibration policy and model manifest do not match")
+        if artifact.get("model_sha256") != model_sha256_from_manifest(manifest):
+            raise ValueError(
+                "Calibration score model_sha256 does not match the model manifest"
+            )
 
     policy, _ = validate_calibration_artifact(artifact)
     required = {
@@ -142,6 +151,10 @@ def _confirmation_preflight(
         raise ValueError("Evaluation scores must contain exactly one model_sha256")
     if str(model_hashes[0]) != str(artifact.get("model_sha256")):
         raise ValueError("Calibration and evaluation scores use different models")
+    if manifest is not None and str(model_hashes[0]) != model_sha256_from_manifest(manifest):
+        raise ValueError(
+            "Evaluation score model_sha256 does not match the model manifest"
+        )
     if prefix_scores["event_id"].isna().any():
         raise ValueError("Evaluation score event_id must not contain missing values")
     if prefix_scores.duplicated(["event_id", "time_to_tca"]).any():
@@ -196,8 +209,13 @@ def confirmation_command(args: argparse.Namespace) -> None:
     ]
     prefixes = attach_event_labels(prefix_scores, labels_for_scored_events)
     policy = None if manifest is None else policy_from_model_manifest(manifest)
+    evaluation_confidence = (
+        None if manifest is None
+        else evaluation_confidence_from_model_manifest(manifest)
+    )
     result = evaluate(
-        prefixes, artifact, event_labels, shift_gate=shift_gate, policy=policy
+        prefixes, artifact, event_labels, shift_gate=shift_gate, policy=policy,
+        evaluation_confidence=evaluation_confidence,
     )
     result.update(lock_payload)
     result["completed_at_utc"] = datetime.now(timezone.utc).isoformat()

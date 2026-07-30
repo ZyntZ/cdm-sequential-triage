@@ -124,6 +124,34 @@ def validate_calibration_artifact(
     return policy, rule
 
 
+
+
+def model_sha256_from_manifest(manifest: dict[str, Any]) -> str:
+    """Return the model binary identity declared by a model manifest."""
+    value = manifest.get("outputs", {}).get("model", {}).get("sha256")
+    if not isinstance(value, str) or len(value) != 64:
+        raise ValueError("Model manifest has no valid model SHA-256")
+    try:
+        int(value, 16)
+    except ValueError as error:
+        raise ValueError("Model manifest model SHA-256 must be hexadecimal") from error
+    return value
+
+
+def evaluation_confidence_from_model_manifest(manifest: dict[str, Any]) -> float:
+    """Return the confidence level frozen for the evaluation upper bound."""
+    candidate = manifest.get("candidate", {})
+    value = candidate.get(
+        "evaluation_confidence", candidate.get("calibration_confidence")
+    )
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Model manifest has no valid evaluation confidence") from error
+    if not 0 < confidence < 1:
+        raise ValueError("Evaluation confidence must lie in (0, 1)")
+    return confidence
+
 def policy_from_model_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     candidate = manifest.get("candidate", {})
     window = candidate.get("decision_window_days", [])
@@ -211,6 +239,7 @@ def calibrate(
     calibration_labels: pd.DataFrame | None = None,
     shift_gate: ConformalShiftGate | None = None,
     policy: dict[str, Any] | None = None,
+    model_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     policy = POLICY.copy() if policy is None else validate_policy(policy)
     if calibration_labels is None:
@@ -226,6 +255,12 @@ def calibrate(
             labels, on="event_id", how="left", validate="many_to_one"
         )
     prepared = prepare_prefix_scores(prepared_input, policy)
+    if model_manifest is not None:
+        score_model_sha256 = str(prepared["model_sha256"].iloc[0])
+        if score_model_sha256 != model_sha256_from_manifest(model_manifest):
+            raise ValueError(
+                "Calibration score model_sha256 does not match the model manifest"
+            )
     if shift_gate is None:
         scored_events = history_gated_event_table(
             prepared,
@@ -285,12 +320,19 @@ def evaluate(
     evaluation_labels: pd.DataFrame | None = None,
     shift_gate: ConformalShiftGate | None = None,
     policy: dict[str, Any] | None = None,
+    evaluation_confidence: float | None = None,
 ) -> dict[str, Any]:
     expected_policy = POLICY if policy is None else validate_policy(policy)
     policy, calibration_rule = validate_calibration_artifact(
         calibration_artifact, expected_policy
     )
     threshold = calibration_rule["threshold"]
+    if evaluation_confidence is None:
+        evaluation_confidence = float(policy["confidence"])
+    else:
+        evaluation_confidence = float(evaluation_confidence)
+        if not 0 < evaluation_confidence < 1:
+            raise ValueError("evaluation_confidence must lie in (0, 1)")
     expected_gate_hash = calibration_artifact.get("shift_gate_sha256")
     supplied_gate_hash = None if shift_gate is None else shift_gate.fingerprint()
     if expected_gate_hash != supplied_gate_hash:
@@ -349,7 +391,8 @@ def evaluate(
         "danger_k": danger_k,
         "danger_n": danger_n,
         "danger_rate": danger_k / danger_n,
-        "danger_ucb": cp_upper(danger_k, danger_n, policy["confidence"]),
+        "danger_ucb": cp_upper(danger_k, danger_n, evaluation_confidence),
+        "evaluation_confidence": evaluation_confidence,
         "calibration_rank": int(calibration_rule["rank"]),
         "calibration_n_positive": int(calibration_rule["n_positive"]),
         "calibration_marginal_bound": float(calibration_rule["marginal_bound"]),

@@ -216,16 +216,9 @@ def check_v13_readiness(
             targets["recommended_calibration_positive_events"],
             targets["recommended_evaluation_positive_events"],
             alpha=alpha,
-            confidence=calibration_confidence,
+            calibration_confidence=calibration_confidence,
+            evaluation_confidence=evaluation_confidence,
         )
-        if evaluation_confidence != calibration_confidence:
-            evaluation = validation_design_summary(
-                targets["recommended_calibration_positive_events"],
-                targets["recommended_evaluation_positive_events"],
-                alpha=alpha,
-                confidence=evaluation_confidence,
-            )["evaluation"]
-            statistical_design["evaluation"] = evaluation
         expected_total = (
             targets["recommended_calibration_positive_events"]
             + targets["recommended_evaluation_positive_events"]
@@ -236,6 +229,10 @@ def check_v13_readiness(
         design_ok = (
             statistical_design["calibration"]["finite_threshold_available"]
             and statistical_design["calibration"]["pac_bound"] <= alpha
+            and statistical_design["calibration"]["confidence"]
+            == calibration_confidence
+            and statistical_design["evaluation"]["confidence"]
+            == evaluation_confidence
             and statistical_design["evaluation"][
                 "maximum_passing_dangerous_exclusions"
             ] >= 0
