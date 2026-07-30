@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from typing import Any
+import hashlib
+import json
 
 import numpy as np
 import pandas as pd
@@ -17,6 +19,21 @@ PREFIX_FEATURES = tuple(
 ) + ("n_cdm_so_far", "dt_prev", "history_span_days", "eligible_history_count")
 DYNAMIC_NUMERIC_FEATURES = tuple(dict.fromkeys(NUMERIC_FEATURES + PREFIX_FEATURES))
 DYNAMIC_FEATURES = DYNAMIC_NUMERIC_FEATURES + CATEGORICAL_FEATURES
+
+
+def feature_contract_sha256(
+    features: tuple[str, ...] | list[str] = DYNAMIC_FEATURES,
+) -> str:
+    """Return an order-sensitive SHA-256 for a feature-name contract."""
+    if not isinstance(features, (tuple, list)) or not features:
+        raise ValueError("Feature contract must be a non-empty ordered sequence")
+    normalized = [str(value) for value in features]
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("Feature contract contains duplicate names")
+    canonical = json.dumps(
+        normalized, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def validate_dynamic_feature_contract(

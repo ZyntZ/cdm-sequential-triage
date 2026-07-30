@@ -102,6 +102,15 @@ def validate_score_stream(
         raise ValueError("Scores must contain exactly one model_sha256")
     if str(model_hashes[0]) != str(artifact.get("model_sha256")):
         raise ValueError("Score stream and calibration artifact use different models")
+    expected_contract = artifact.get("feature_contract_sha256")
+    if expected_contract is not None:
+        if "feature_contract_sha256" not in scores.columns:
+            raise ValueError("Runtime score stream is missing feature_contract_sha256")
+        contract_hashes = scores["feature_contract_sha256"].dropna().astype(str).unique()
+        if len(contract_hashes) != 1 or scores["feature_contract_sha256"].isna().any():
+            raise ValueError("Runtime scores must contain exactly one feature_contract_sha256")
+        if str(contract_hashes[0]) != str(expected_contract):
+            raise ValueError("Runtime score stream feature contract does not match calibration")
     calibration_ids = set(artifact.get("calibration_event_ids", []))
     incoming_ids = set(scores["event_id"].astype(str).unique())
     overlap = calibration_ids.intersection(incoming_ids)
@@ -222,6 +231,7 @@ def run_replay(
     audit["model_sha256"] = str(artifact["model_sha256"])
     audit["shift_gate_sha256"] = artifact.get("shift_gate_sha256")
     audit["model_manifest_sha256"] = artifact.get("model_manifest_sha256")
+    audit["feature_contract_sha256"] = artifact.get("feature_contract_sha256")
     audit["runtime_configuration_sha256"] = runtime.configuration_fingerprint()
     audit["safe_threshold"] = runtime.safe_threshold
     audit["escalation_threshold"] = runtime.escalation_threshold

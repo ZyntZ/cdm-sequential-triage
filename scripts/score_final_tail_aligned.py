@@ -14,7 +14,10 @@ from catboost import CatBoostClassifier
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from event_aligned_model import score_dynamic_frame, validate_dynamic_feature_contract
+from event_aligned_model import (
+    feature_contract_sha256, score_dynamic_frame,
+    validate_dynamic_feature_contract,
+)
 from snapshot_model import file_sha256
 from study import validate_feature_cohort
 
@@ -75,7 +78,8 @@ def score_file(
         raise ValueError("Scoring features must not contain y")
     model = CatBoostClassifier()
     model.load_model(str(model_path))
-    validate_dynamic_feature_contract(model, manifest.get("features"))
+    contract = validate_dynamic_feature_contract(model, manifest.get("features"))
+    contract_sha256 = feature_contract_sha256(contract)
     score_column = manifest.get("score_column")
     scores = score_dynamic_frame(
         model,
@@ -84,6 +88,7 @@ def score_file(
         passthrough_columns=gate_features,
     )
     scores["model_sha256"] = actual_hash
+    scores["feature_contract_sha256"] = contract_sha256
     if study_hash is not None:
         scores["study_manifest_sha256"] = study_hash
         scores["study_cohort"] = cohort

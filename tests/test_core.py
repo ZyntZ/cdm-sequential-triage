@@ -10,7 +10,7 @@ from history_gate_diagnostics import (
 )
 from event_aligned_diagnostics import attach_event_folds
 from event_aligned_model import (
-    DYNAMIC_FEATURES, fit_dynamic_model, positive_tail_weights,
+    DYNAMIC_FEATURES, feature_contract_sha256, fit_dynamic_model, positive_tail_weights,
     prepare_dynamic_frame, score_dynamic_frame, score_dynamic_model,
     validate_dynamic_feature_contract,
 )
@@ -2424,6 +2424,52 @@ def test_tail_score_file_rejects_manifest_feature_contract_drift(tmp_path):
     assert not output_path.exists()
 
 
+def test_feature_contract_sha256_is_order_sensitive_and_stable():
+    digest = feature_contract_sha256()
+    assert len(digest) == 64
+    int(digest, 16)
+    assert digest == feature_contract_sha256(list(DYNAMIC_FEATURES))
+    reordered = list(DYNAMIC_FEATURES)
+    reordered[0], reordered[1] = reordered[1], reordered[0]
+    assert feature_contract_sha256(reordered) != digest
+
+
+def test_calibration_and_evaluation_bind_feature_contract():
+    digest = feature_contract_sha256()
+    calibration_scores = confirmation_scores().assign(
+        feature_contract_sha256=digest
+    )
+    artifact = calibrate(calibration_scores)
+    assert artifact["feature_contract_sha256"] == digest
+
+    evaluation_scores = confirmation_scores(event_offset=100).assign(
+        feature_contract_sha256=digest
+    )
+    result = evaluate(evaluation_scores, artifact)
+    assert result["feature_contract_sha256"] == digest
+
+    mismatched = evaluation_scores.assign(feature_contract_sha256="0" * 64)
+    with np.testing.assert_raises_regex(ValueError, "different feature contracts"):
+        evaluate(mismatched, artifact)
+
+
+def test_confirmation_v1_style_scores_remain_backward_compatible():
+    artifact = calibrate(confirmation_scores())
+    assert artifact["feature_contract_sha256"] is None
+    result = evaluate(confirmation_scores(event_offset=100), artifact)
+    assert result["feature_contract_sha256"] is None
+
+
+def test_prepare_prefix_scores_rejects_invalid_or_mixed_contract_hashes():
+    frame = confirmation_scores().assign(feature_contract_sha256="not-a-digest")
+    with np.testing.assert_raises_regex(ValueError, "64-character"):
+        prepare_prefix_scores(frame)
+    mixed = confirmation_scores().assign(feature_contract_sha256="a" * 64)
+    mixed.loc[mixed.index[-1], "feature_contract_sha256"] = "b" * 64
+    with np.testing.assert_raises_regex(ValueError, "exactly one"):
+        prepare_prefix_scores(mixed)
+
+
 def test_dynamic_scoring_is_label_blind_and_returns_confirmation_columns():
     training = snapshot_training_frame()
     prepared = prepare_dynamic_frame(training)
@@ -2891,6 +2937,8 @@ def test_tail_score_file_retains_gate_features(tmp_path):
     )
     assert output_path.exists()
     assert {"risk", "max_risk_estimate", "miss_distance", "mahalanobis_distance"}.issubset(scores.columns)
+    assert scores["feature_contract_sha256"].nunique() == 1
+    assert scores["feature_contract_sha256"].iloc[0] == feature_contract_sha256()
     pd.testing.assert_frame_equal(scores, pd.read_parquet(output_path))
 
 
@@ -3147,6 +3195,49 @@ def test_replay_scores_requires_matching_gate_and_gate_columns(tmp_path):
         )
     with np.testing.assert_raises(ValueError):
         load_runtime(calibration)
+
+
+def test_confirmation_preflight_rejects_feature_contract_mismatch(tmp_path):
+    import argparse
+
+    digest = feature_contract_sha256()
+    artifact = calibrate(
+        confirmation_scores().assign(feature_contract_sha256=digest)
+    )
+    scores = tmp_path / "evaluation.parquet"
+    confirmation_scores(event_offset=100).drop(columns="y").assign(
+        feature_contract_sha256="0" * 64
+    ).to_parquet(scores, index=False)
+    args = argparse.Namespace(
+        scores=scores, gate=None, model_manifest=None,
+        study_manifest=None, study_lock=None,
+    )
+    with np.testing.assert_raises_regex(ValueError, "different feature contracts"):
+        _confirmation_preflight(args, artifact)
+
+
+def test_runtime_replay_binds_feature_contract(tmp_path):
+    digest = feature_contract_sha256()
+    artifact = runtime_calibration_artifact()
+    artifact["feature_contract_sha256"] = digest
+    calibration = tmp_path / "calibration.json"
+    calibration.write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+    scores_path = tmp_path / "scores.parquet"
+    pd.DataFrame({
+        "event_id": ["event"], "time_to_tca": [5.0],
+        "catboost_tail_aligned": [0.10],
+        "model_sha256": ["runtime-model"],
+        "feature_contract_sha256": [digest],
+    }).to_parquet(scores_path, index=False)
+    audit = run_replay(scores_path, calibration, tmp_path / "audit.parquet")
+    assert audit["feature_contract_sha256"].eq(digest).all()
+
+    bad_scores = tmp_path / "bad-scores.parquet"
+    pd.read_parquet(scores_path).assign(
+        feature_contract_sha256="0" * 64
+    ).to_parquet(bad_scores, index=False)
+    with np.testing.assert_raises_regex(ValueError, "feature contract"):
+        run_replay(bad_scores, calibration, tmp_path / "bad-audit.parquet")
 
 
 def test_confirmation_preflight_failure_does_not_burn_lock(tmp_path):
