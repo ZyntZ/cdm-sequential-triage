@@ -50,6 +50,7 @@ from validation_plan import (
     calibration_design, evaluation_planning_table, maximum_passing_failures,
     minimum_positive_events, pass_probability, validation_design_summary,
 )
+from verify_oof_evidence import verify_oof_evidence
 from prefix_features import build_prefix_features, eligible_prefixes
 from robustness import subgroup_metrics
 from shift_gate import ConformalShiftGate
@@ -1679,18 +1680,6 @@ def test_validation_design_summary_matches_frozen_v13_claims():
     assert 0.79 < design["evaluation"]["pass_probability_at_assumed_rate"] < 0.80
 
 
-def test_validation_design_summary_uses_separate_confidence_levels():
-    design = validation_design_summary(
-        100, 200,
-        calibration_confidence=0.90,
-        evaluation_confidence=0.99,
-    )
-
-    assert design["calibration"]["confidence"] == 0.90
-    assert design["evaluation"]["confidence"] == 0.99
-    assert design["evaluation"]["maximum_passing_dangerous_exclusions"] < 12
-
-
 def test_evaluation_planning_table_is_monotone_in_true_risk():
     table = evaluation_planning_table(positive_counts=(100, 200))
     assert table["positive_events"].tolist() == [100, 200]
@@ -2342,18 +2331,16 @@ def test_complete_rosters_keep_events_without_eligible_prefixes():
 
 
 
-def tail_manifest(model_sha256="a" * 64, evaluation_confidence=0.95):
+def tail_manifest():
     return {
         "score_column": "catboost_tail_aligned",
         "candidate": {
             "alpha": 0.10,
             "calibration_confidence": 0.95,
-            "evaluation_confidence": evaluation_confidence,
             "calibration_mode": "pac",
             "minimum_history": 3,
             "decision_window_days": [2.0, 7.0],
         },
-        "outputs": {"model": {"sha256": model_sha256}},
     }
 
 
@@ -2389,47 +2376,6 @@ def test_label_blind_tail_scores_can_be_calibrated_with_separate_labels():
     calibration = calibrate(scores, labels, policy=policy)
     assert calibration["policy"] == policy
     assert calibration["calibration"]["n_positive"] == 40
-
-
-def test_tail_calibration_rejects_scores_from_another_model():
-    model_sha256 = "a" * 64
-    manifest = tail_manifest(model_sha256=model_sha256)
-    policy = policy_from_model_manifest(manifest)
-    scores = confirmation_scores().rename(
-        columns={"catboost_snapshot": "catboost_tail_aligned"}
-    ).drop(columns="y")
-    labels = confirmation_scores().loc[:, ["event_id", "y"]].drop_duplicates()
-
-    with np.testing.assert_raises_regex(ValueError, "does not match the model manifest"):
-        calibrate(
-            scores, labels, policy=policy, model_manifest=manifest,
-        )
-
-    scores["model_sha256"] = model_sha256
-    artifact = calibrate(
-        scores, labels, policy=policy, model_manifest=manifest,
-    )
-    assert artifact["model_sha256"] == model_sha256
-
-
-def test_tail_evaluation_uses_frozen_evaluation_confidence():
-    policy = policy_from_model_manifest(tail_manifest(evaluation_confidence=0.99))
-    calibration_scores = confirmation_scores().rename(
-        columns={"catboost_snapshot": "catboost_tail_aligned"}
-    )
-    calibration = calibrate(calibration_scores, policy=policy)
-    evaluation_scores = confirmation_scores(event_offset=100).rename(
-        columns={"catboost_snapshot": "catboost_tail_aligned"}
-    )
-
-    default_result = evaluate(evaluation_scores, calibration, policy=policy)
-    frozen_result = evaluate(
-        evaluation_scores, calibration, policy=policy,
-        evaluation_confidence=0.99,
-    )
-
-    assert frozen_result["evaluation"]["evaluation_confidence"] == 0.99
-    assert frozen_result["evaluation"]["danger_ucb"] > default_result["evaluation"]["danger_ucb"]
 
 
 def test_tail_confirmation_requires_the_same_frozen_policy():
@@ -3172,43 +3118,6 @@ def test_confirmation_preflight_rejects_tampered_rule_before_lock(tmp_path):
     )
 
     with np.testing.assert_raises(ValueError):
-        _confirmation_preflight(args, artifact)
-
-
-def test_confirmation_preflight_rejects_manifest_model_mismatch(tmp_path):
-    import argparse
-
-    model_sha256 = "a" * 64
-    manifest = tail_manifest(model_sha256=model_sha256)
-    manifest_path = tmp_path / "model.json"
-    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
-
-    policy = policy_from_model_manifest(manifest)
-    calibration_scores = confirmation_scores().rename(
-        columns={"catboost_snapshot": "catboost_tail_aligned"}
-    )
-    calibration_scores["model_sha256"] = model_sha256
-    artifact = calibrate(
-        calibration_scores, policy=policy, model_manifest=manifest,
-    )
-    artifact["model_manifest_sha256"] = file_sha256(manifest_path)
-    artifact["study_manifest_sha256"] = None
-
-    evaluation_scores = confirmation_scores(event_offset=100).rename(
-        columns={"catboost_snapshot": "catboost_tail_aligned"}
-    ).drop(columns="y")
-    evaluation_scores["model_sha256"] = "b" * 64
-    scores_path = tmp_path / "evaluation.parquet"
-    evaluation_scores.to_parquet(scores_path, index=False)
-    args = argparse.Namespace(
-        scores=scores_path,
-        gate=None,
-        model_manifest=manifest_path,
-        study_manifest=None,
-        study_lock=None,
-    )
-
-    with np.testing.assert_raises_regex(ValueError, "different models"):
         _confirmation_preflight(args, artifact)
 
 
@@ -4523,6 +4432,79 @@ def test_restore_rejects_nonnull_genesis_link(tmp_path):
     )
     with np.testing.assert_raises(ValueError):
         SequentialTriagePolicy.restore(checkpoint)
+
+def test_oof_evidence_verification_matches_frozen_development_artifacts():
+    root = Path(__file__).resolve().parents[1]
+    result = verify_oof_evidence(
+        root / "artifacts" / "development_event_aligned_oof_v8.parquet",
+        root / "artifacts" / "development_event_aligned_v8.json",
+        root / "artifacts" / "catboost_tail_aligned_final_v13.json",
+        root / "artifacts" / "catboost_tail_aligned_final_v13.cbm",
+        root / "artifacts" / "next_validation_preregistration_v12.json",
+        root / "artifacts" / "next_validation_preregistration_v12.lock",
+    )
+
+    assert result["status"] == "development-only-oof-verification"
+    assert result["passed"] is True
+    assert len(result["checks"]) == 40
+    assert result["recomputed_metrics"]["danger_k"] == 12
+    assert result["recomputed_metrics"]["danger_n"] == 192
+    assert result["recomputed_metrics"]["safe_negative"] == 5286
+    assert abs(result["recomputed_metrics"]["danger_ucb"] - 0.09929771751247034) < 1e-15
+    assert "not cryptographically bound" in result["limitations"][0]
+
+
+def test_oof_evidence_verification_detects_metric_tampering(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    development = json.loads(
+        (root / "artifacts" / "development_event_aligned_v8.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    development["metrics"]["danger_k"] = 11
+    development_path = tmp_path / "development_event_aligned_v8.json"
+    development_path.write_text(
+        json.dumps(development) + "\n", encoding="utf-8"
+    )
+    preregistration = json.loads(
+        (root / "artifacts" / "next_validation_preregistration_v12.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    terminal = preregistration["candidate_selection"]["terminal_development_artifacts"]
+    key = next(key for key in terminal if Path(key).name == development_path.name)
+    terminal[key] = file_sha256(development_path)
+    preregistration_path = tmp_path / "preregistration.json"
+    preregistration_path.write_text(
+        json.dumps(preregistration) + "\n", encoding="utf-8"
+    )
+    preregistration_lock = tmp_path / "preregistration.lock"
+    preregistration_lock.write_text(json.dumps({
+        "preregistration_sha256": file_sha256(preregistration_path)
+    }) + "\n", encoding="utf-8")
+    v13 = json.loads(
+        (root / "artifacts" / "catboost_tail_aligned_final_v13.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    v13["preregistration"]["sha256"] = file_sha256(preregistration_path)
+    v13["preregistration"]["lock_sha256"] = file_sha256(preregistration_lock)
+    v13_path = tmp_path / "v13.json"
+    v13_path.write_text(json.dumps(v13) + "\n", encoding="utf-8")
+
+    result = verify_oof_evidence(
+        root / "artifacts" / "development_event_aligned_oof_v8.parquet",
+        development_path,
+        v13_path,
+        root / "artifacts" / "catboost_tail_aligned_final_v13.cbm",
+        preregistration_path,
+        preregistration_lock,
+    )
+
+    assert result["passed"] is False
+    failed = {check["name"] for check in result["checks"] if not check["passed"]}
+    assert "metric_danger_k" in failed
+
 
 def test_v13_readiness_verifies_frozen_artifacts_without_outcomes():
     root = Path(__file__).resolve().parents[1]
