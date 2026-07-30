@@ -21,6 +21,7 @@ from confirmation import (
     read_json,
     validate_calibration_artifact,
     write_json,
+    write_confirmation_status_sidecar,
 )
 from shift_gate import ConformalShiftGate
 from study import (
@@ -197,21 +198,46 @@ def confirmation_command(args: argparse.Namespace) -> None:
         ),
     }
     acquire_confirmation_lock(args.lock, lock_payload)
-    event_labels = pd.read_parquet(args.labels)
-    _study_context(args, "evaluation", event_labels)
-    scored_ids = set(prefix_scores["event_id"].astype(str).unique())
-    labels_for_scored_events = event_labels.loc[
-        event_labels["event_id"].astype(str).isin(scored_ids)
-    ]
-    prefixes = attach_event_labels(prefix_scores, labels_for_scored_events)
-    policy = None if manifest is None else policy_from_model_manifest(manifest)
-    result = evaluate(
-        prefixes, artifact, event_labels, shift_gate=shift_gate, policy=policy
+    try:
+        event_labels = pd.read_parquet(args.labels)
+        _study_context(args, "evaluation", event_labels)
+        scored_ids = set(prefix_scores["event_id"].astype(str).unique())
+        labels_for_scored_events = event_labels.loc[
+            event_labels["event_id"].astype(str).isin(scored_ids)
+        ]
+        prefixes = attach_event_labels(prefix_scores, labels_for_scored_events)
+        policy = None if manifest is None else policy_from_model_manifest(manifest)
+        result = evaluate(
+            prefixes, artifact, event_labels, shift_gate=shift_gate, policy=policy
+        )
+        result.update(lock_payload)
+        result["feature_contract_sha256"] = artifact.get("feature_contract_sha256")
+        result["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+        write_json(args.output, result)
+    except Exception as error:
+        try:
+            write_confirmation_status_sidecar(
+                args.lock,
+                status="failed",
+                payload={
+                    "failed_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "failure_type": type(error).__name__,
+                    "failure_message": str(error),
+                    "output": str(args.output),
+                },
+            )
+        except Exception:
+            pass
+        raise
+    write_confirmation_status_sidecar(
+        args.lock,
+        status="completed",
+        payload={
+            "completed_at_utc": result["completed_at_utc"],
+            "output": str(args.output),
+            "output_sha256": file_sha256(args.output),
+        },
     )
-    result.update(lock_payload)
-    result["feature_contract_sha256"] = artifact.get("feature_contract_sha256")
-    result["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
-    write_json(args.output, result)
     metrics = result["evaluation"]
     print(
         f"danger={metrics['danger_k']}/{metrics['danger_n']} "

@@ -59,7 +59,8 @@ from shift_gate import ConformalShiftGate
 from triage import Decision, SequentialTriagePolicy
 from confirmation import (
     POLICY, acquire_confirmation_lock, attach_event_labels, calibrate, evaluate,
-    policy_from_model_manifest, prepare_prefix_scores, write_json,
+    confirmation_status_path, policy_from_model_manifest, prepare_prefix_scores,
+    read_confirmation_status, write_confirmation_status_sidecar, write_json,
 )
 from snapshot_model import (
     assert_disjoint_splits, event_equal_weights, fit_snapshot_model,
@@ -3240,6 +3241,51 @@ def test_runtime_replay_binds_feature_contract(tmp_path):
         run_replay(bad_scores, calibration, tmp_path / "bad-audit.parquet")
 
 
+def test_confirmation_status_sidecar_tracks_started_completed_and_legacy(tmp_path):
+    lock = tmp_path / "confirmation.lock"
+    output = tmp_path / "confirmation.json"
+    assert read_confirmation_status(lock, output)["status"] == "not-started"
+    acquire_confirmation_lock(lock, {"run": 1})
+    original = lock.read_bytes()
+    assert read_confirmation_status(lock, output)["status"] == "in-progress"
+    output.write_text('{"evaluation": {}}\n', encoding="utf-8")
+    assert read_confirmation_status(lock, output)["status"] == "legacy-completed"
+    write_confirmation_status_sidecar(
+        lock, status="completed", payload={
+            "completed_at_utc": "2026-07-30T00:00:00+00:00",
+            "output": str(output),
+            "output_sha256": file_sha256(output),
+        },
+    )
+    assert lock.read_bytes() == original
+    status = read_confirmation_status(lock, output)
+    assert status["status"] == "completed"
+    assert status["output_sha256"] == file_sha256(output)
+    assert confirmation_status_path(lock).exists()
+
+
+def test_confirmation_status_rejects_tampered_lock_or_output(tmp_path):
+    lock = tmp_path / "confirmation.lock"
+    output = tmp_path / "confirmation.json"
+    acquire_confirmation_lock(lock, {"run": 1})
+    output.write_text('{}\n', encoding="utf-8")
+    write_confirmation_status_sidecar(
+        lock, status="completed", payload={
+            "output": str(output), "output_sha256": file_sha256(output),
+        },
+    )
+    output.write_text('{"tampered": true}\n', encoding="utf-8")
+    with np.testing.assert_raises_regex(ValueError, "output"):
+        read_confirmation_status(lock, output)
+
+
+def test_confirmation_status_rejects_invalid_terminal_state(tmp_path):
+    lock = tmp_path / "confirmation.lock"
+    acquire_confirmation_lock(lock, {"run": 1})
+    with np.testing.assert_raises(ValueError):
+        write_confirmation_status_sidecar(lock, status="unknown", payload={})
+
+
 def test_confirmation_preflight_failure_does_not_burn_lock(tmp_path):
     import argparse
     calibration = tmp_path / "calibration.json"
@@ -3292,6 +3338,42 @@ def test_confirmation_preflight_rejects_tampered_rule_before_lock(tmp_path):
         _confirmation_preflight(args, artifact)
 
 
+def test_confirmation_post_lock_failure_writes_failed_status(tmp_path, monkeypatch):
+    import argparse
+    import confirm_policy as confirm_module
+
+    calibration = tmp_path / "calibration.json"
+    artifact = runtime_calibration_artifact()
+    artifact["policy"] = POLICY.copy()
+    artifact["study_manifest_sha256"] = None
+    calibration.write_text(json.dumps(artifact) + "\n", encoding="utf-8")
+    scores = tmp_path / "evaluation.parquet"
+    pd.DataFrame({
+        "event_id": ["positive"] * 3,
+        "time_to_tca": [7.0, 6.0, 5.0],
+        "catboost_snapshot": [0.90] * 3,
+        "model_sha256": ["runtime-model"] * 3,
+    }).to_parquet(scores, index=False)
+    labels = tmp_path / "labels.parquet"
+    pd.DataFrame({"event_id": ["positive"], "y": [1]}).to_parquet(labels, index=False)
+    args = argparse.Namespace(
+        scores=scores, calibration=calibration, labels=labels,
+        output=tmp_path / "confirmation.json", lock=tmp_path / "confirmation.lock",
+        gate=None, model_manifest=None, study_manifest=None, study_lock=None,
+    )
+    def fail_evaluate(*_args, **_kwargs):
+        raise ValueError("simulated post-lock failure")
+    monkeypatch.setattr(confirm_module, "evaluate", fail_evaluate)
+    with np.testing.assert_raises_regex(ValueError, "simulated post-lock failure"):
+        confirmation_command(args)
+    assert args.lock.exists()
+    assert not args.output.exists()
+    status = read_confirmation_status(args.lock, args.output)
+    assert status["status"] == "failed"
+    assert status["failure_type"] == "ValueError"
+    assert "simulated post-lock failure" in status["failure_message"]
+
+
 def test_confirmation_command_writes_lock_and_result_after_valid_preflight(tmp_path):
     import argparse
     calibration = tmp_path / "calibration.json"
@@ -3325,6 +3407,7 @@ def test_confirmation_command_writes_lock_and_result_after_valid_preflight(tmp_p
     confirmation_command(args)
 
     assert args.lock.exists()
+    assert read_confirmation_status(args.lock, args.output)["status"] == "completed"
     result = json.loads(args.output.read_text(encoding="utf-8"))
     assert result["evaluation"]["danger_k"] == 0
     assert result["evaluation"]["danger_n"] == 1

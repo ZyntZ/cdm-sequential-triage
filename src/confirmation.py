@@ -445,3 +445,58 @@ def acquire_confirmation_lock(path: str | Path, payload: dict[str, Any]) -> None
     except Exception:
         target.unlink(missing_ok=True)
         raise
+
+
+def confirmation_status_path(lock_path: str | Path) -> Path:
+    """Return the sidecar path used to record terminal confirmation state."""
+    lock = Path(lock_path)
+    return lock.with_name(lock.name + ".status.json")
+
+
+def write_confirmation_status_sidecar(
+    lock_path: str | Path,
+    *,
+    status: str,
+    payload: dict[str, Any],
+) -> Path:
+    """Atomically record terminal state without modifying the one-shot lock."""
+    if status not in {"completed", "failed"}:
+        raise ValueError("Confirmation status must be completed or failed")
+    lock = Path(lock_path)
+    if not lock.is_file():
+        raise FileNotFoundError(f"Confirmation lock is missing: {lock}")
+    sidecar = confirmation_status_path(lock)
+    record = {
+        "schema_version": 1,
+        "status": status,
+        "lock_sha256": file_sha256(lock),
+        **payload,
+    }
+    write_json(sidecar, record)
+    return sidecar
+
+
+def read_confirmation_status(
+    lock_path: str | Path,
+    output_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Return not-started, in-progress, legacy-completed, failed, or completed."""
+    lock = Path(lock_path)
+    output = None if output_path is None else Path(output_path)
+    if not lock.exists():
+        return {"status": "not-started", "lock": str(lock)}
+    sidecar = confirmation_status_path(lock)
+    if not sidecar.exists():
+        status = "legacy-completed" if output is not None and output.is_file() else "in-progress"
+        return {"status": status, "lock_sha256": file_sha256(lock)}
+    record = read_json(sidecar)
+    if record.get("schema_version") != 1 or record.get("status") not in {"completed", "failed"}:
+        raise ValueError("Invalid confirmation status sidecar")
+    if record.get("lock_sha256") != file_sha256(lock):
+        raise ValueError("Confirmation status sidecar does not match its lock")
+    if record["status"] == "completed":
+        if output is None or not output.is_file():
+            raise ValueError("Completed confirmation status has no output")
+        if record.get("output_sha256") != file_sha256(output):
+            raise ValueError("Confirmation status sidecar does not match its output")
+    return record
