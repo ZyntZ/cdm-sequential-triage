@@ -35,7 +35,7 @@ from replay_scores import (
 from operator_dashboard import (
     build_dashboard, current_events, explain_event_sequence, load_audits,
 )
-from evidence_dashboard import build_evidence_dashboard
+from evidence_dashboard import build_evidence_dashboard, validate_planning_table
 from run_demo import run_demo, verify_demo_bundle
 from confirm_policy import (
     _confirmation_preflight, calibration_command, confirmation_command,
@@ -3803,6 +3803,10 @@ def test_evidence_dashboard_builds_three_verified_tiers(tmp_path):
     assert summary["calibration_accessed"] is False
     assert summary["evaluation_accessed"] is False
     assert summary["v13_threshold"] is None
+    assert abs(summary["historical_correct_safe_excludes_per_1000"] - 686.8110984416572) < 1e-12
+    assert abs(summary["historical_remaining_per_1000"] - 313.1889015583428) < 1e-12
+    assert summary["candidate_fold_safety_passes"] == 1
+    assert summary["candidate_fold_safety_total"] == 5
     assert "id='development'" in document
     assert "id='confirmation'" in document
     assert "id='preregistered'" in document
@@ -3827,8 +3831,23 @@ def test_evidence_dashboard_embeds_frontier_and_fold_stability(tmp_path):
     assert "fold 1" in document and "+6.97 pp" in document
     assert "12/192 dangerous exclusions" in document
     assert "2.43 percentage points" in document
+    assert "1/5 folds meet the pooled 10% UCB criterion" in document
+    assert "38–39 positive events" in document
+    assert "687 correct SAFE-EXCLUDE decisions per 1,000" in document
+    assert "313" in document and "Remaining per 1,000" in document
     assert "not confirmation evidence" in document
     assert "https://" not in document
+
+
+def test_evidence_planning_validation_rejects_recomputed_claim_mismatch():
+    plan = pd.DataFrame({
+        "positive_events": [200],
+        "maximum_passing_failures": [11],
+        "upper_bound_at_maximum": [0.09540141772987734],
+        "pass_probability_if_true_rate_0.05": [0.7964843459884561],
+    })
+    with np.testing.assert_raises_regex(ValueError, "maximum-passing-failures"):
+        validate_planning_table(plan, alpha=0.10, confidence=0.95)
 
 
 def test_frontier_svg_marks_feasibility_and_pareto_status():
@@ -3868,6 +3887,8 @@ def test_russian_demo_localizes_operator_and_evidence_dashboards(tmp_path):
     assert "Доказательная панель" in evidence
     assert "Граница безопасность–автоматизация" in evidence
     assert "КРИТЕРИЙ НЕ ВЫПОЛНЕН" in evidence
+    assert "Диагностика безопасности по folds" in evidence
+    assert "корректных решений SAFE-EXCLUDE на 1 000" in evidence
     assert evidence.count("<svg class='evidence-plot'") == 2
     assert "https://" not in operator
     assert "https://" not in evidence

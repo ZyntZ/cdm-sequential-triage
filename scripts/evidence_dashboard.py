@@ -8,6 +8,7 @@ import sys
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'src'))
 from confirmation import file_sha256, read_json, validate_calibration_artifact
+from validation_plan import maximum_passing_failures, pass_probability, cp_upper
 
 def esc(x): return html.escape('—' if x is None else str(x),quote=True)
 def pct(x): return f"{100*float(x):.2f}%"
@@ -94,6 +95,47 @@ def fold_stability_svg(folds: pd.DataFrame) -> str:
     return ''.join(parts)
 
 
+def validate_planning_table(
+    plan: pd.DataFrame,
+    *,
+    alpha: float,
+    confidence: float,
+    assumed_rate: float = 0.05,
+) -> None:
+    """Recompute every finite-sample claim displayed from the planning CSV."""
+    probability_column = f"pass_probability_if_true_rate_{assumed_rate:.2f}"
+    required = {
+        "positive_events", "maximum_passing_failures",
+        "upper_bound_at_maximum", probability_column,
+    }
+    missing = required.difference(plan.columns)
+    if missing:
+        raise ValueError(f"Missing planning columns: {sorted(missing)}")
+    if plan.empty or plan["positive_events"].duplicated().any():
+        raise ValueError("Planning table must contain unique positive-event counts")
+    for _, row in plan.iterrows():
+        n_positive = int(row["positive_events"])
+        expected_failures = maximum_passing_failures(
+            n_positive, alpha=alpha, confidence=confidence
+        )
+        observed_failures = int(row["maximum_passing_failures"])
+        if observed_failures != expected_failures:
+            raise ValueError("Planning maximum-passing-failures mismatch")
+        expected_bound = (
+            None if expected_failures < 0
+            else cp_upper(expected_failures, n_positive, confidence)
+        )
+        observed_bound = row["upper_bound_at_maximum"]
+        if expected_bound is None or not abs(float(observed_bound) - expected_bound) <= 1e-12:
+            raise ValueError("Planning upper-bound mismatch")
+        expected_probability = pass_probability(
+            n_positive, assumed_rate, alpha=alpha, confidence=confidence
+        )
+        observed_probability = row[probability_column]
+        if not abs(float(observed_probability) - expected_probability) <= 1e-12:
+            raise ValueError("Planning pass-probability mismatch")
+
+
 SUPPORTED_LOCALES = {"en", "ru"}
 
 
@@ -115,6 +157,10 @@ def localize_evidence_document(document: str, locale: str) -> str:
         ("Dangerous-exclusion UCB95 (lower is safer)", "UCB95 опасного исключения (меньше — безопаснее)"),
         ("Correct SAFE-EXCLUDE rate (higher is better)", "Доля корректных SAFE-EXCLUDE (больше — лучше)"),
         ("Selected development candidate:", "Выбранный development-кандидат:"),
+        ("Fold-level safety diagnostic", "Диагностика безопасности по folds"),
+        ("folds meet the pooled 10% UCB criterion", "folds выполняют объединённый критерий UCB 10%"),
+        ("Each fold contains only", "Каждый fold содержит только"),
+        ("positive events, so these intervals are imprecise and are not subgroup guarantees.", "положительных событий, поэтому интервалы неточны и не являются гарантиями для подгрупп."),
         ("tail-aligned CatBoost retained", "tail-aligned CatBoost сохранил"),
         ("dangerous exclusions", "опасных исключений"),
         ("and increased correct SAFE-EXCLUDE coverage by", "и увеличил долю корректных SAFE-EXCLUDE на"),
@@ -141,6 +187,11 @@ def localize_evidence_document(document: str, locale: str) -> str:
         ("PRE-SPECIFIED CRITERION MET", "ЗАРАНЕЕ ЗАДАННЫЙ КРИТЕРИЙ ВЫПОЛНЕН"),
         ("Observed danger", "Наблюдаемая доля"),
         ("Median lead", "Медианное упреждение"),
+        ("Correct exclusions per 1,000", "Корректных исключений на 1 000"),
+        ("Remaining per 1,000", "Остаётся на 1 000"),
+        ("Historical queue effect", "Исторический эффект для очереди"),
+        ("correct SAFE-EXCLUDE decisions per 1,000 evaluated events", "корректных решений SAFE-EXCLUDE на 1 000 оценённых событий"),
+        ("This is a retrospective count, not a staffing or monetary claim.", "Это ретроспективный подсчёт, а не оценка штата или денежного эффекта."),
         ("calibration bound", "граница calibration"),
         ("Single immutable historical run for catboost_snapshot. No second run is permitted. This result does not validate the preregistered v13 candidate.", "Единственный неизменяемый исторический запуск catboost_snapshot. Повторный запуск не допускается. Этот результат не подтверждает предзарегистрированный кандидат v13."),
         ("TIER 3 · PREREGISTERED NEXT STUDY · NO OUTCOMES ACCESSED", "УРОВЕНЬ 3 · ПРЕДРЕГИСТРАЦИЯ СЛЕДУЮЩЕГО ИССЛЕДОВАНИЯ · ИСХОДЫ НЕ ОТКРЫТЫ"),
@@ -180,20 +231,31 @@ def build_evidence_dashboard(root:Path,output:Path,locale:str="en")->dict[str,An
     if clock['calibration_artifact_sha256']!=conf['calibration_artifact_sha256'] or clock['evaluation_scores_sha256']!=conf['evaluation_scores_sha256']: raise ValueError('Confirmation lock/result mismatch')
     validate_calibration_artifact(cal, conf.get('policy'))
     if v13['threshold'] is not None or v13['calibration_accessed'] is not False or v13['evaluation_accessed'] is not False: raise ValueError('v13 is not frozen before calibration')
-    criterion=float(conf['policy']['alpha']); passed=float(conf['evaluation']['danger_ucb'])<=criterion
+    criterion=float(conf['policy']['alpha'])
+    confidence=float(conf['policy']['confidence'])
+    validate_planning_table(plan, alpha=criterion, confidence=confidence)
+    passed=float(conf['evaluation']['danger_ucb'])<=criterion
     devrows=''.join(f"<tr><td>{esc(x['method'])}</td><td>{x['danger_k']}/{x['danger_n']}</td><td>{pct(x['danger_ucb'])}</td><td>{pct(x['safe_negative_rate'])}</td><td>{'YES' if x['safety_feasible'] else 'NO'}</td><td>{'YES' if x['pareto_frontier'] else 'NO'}</td></tr>" for x in v10['summary'])
     stab=''.join(f"<tr><td>{esc(x['method'])}</td><td>{int(x['repeats'])}</td><td>{pct(x['median_safe_negative_rate'])}</td><td>{pct(x['coverage_delta_positive_fraction'])}</td><td>{pct(x['danger_not_worse_fraction'])}</td></tr>" for x in v11['summary'])
     pc='pass_probability_if_true_rate_0.05'; prow=''.join(f"<tr><td>{int(x['positive_events'])}</td><td>{int(x['maximum_passing_failures'])}</td><td>{pct(x['upper_bound_at_maximum'])}</td><td>{pct(x[pc])}</td></tr>" for _,x in plan.iterrows())
     m=conf['evaluation']; cr=cal['calibration']; cand=pre['candidate']; ns=pre['new_study']; frontier=frontier_svg(v10['summary'],float(pre['candidate']['alpha'])); foldplot=fold_stability_svg(folds); tail=next(x for x in v10['summary'] if x['method']=='catboost_tail_aligned')
+    tail_folds=folds.loc[folds['method'].eq('catboost_tail_aligned')].copy()
+    fold_safety_passes=int(tail_folds['danger_ucb'].le(criterion).sum())
+    fold_safety_total=int(len(tail_folds))
+    fold_positive_min=int(tail_folds['danger_n'].min())
+    fold_positive_max=int(tail_folds['danger_n'].max())
+    evaluation_events=int(conf['evaluation_events'])
+    safe_per_1000=1000.0*int(m['safe_negative'])/evaluation_events
+    remaining_per_1000=1000.0*(evaluation_events-int(m['safe_negative']))/evaluation_events
     css="body{margin:0;background:#071018;color:#e6eef2;font:14px Arial}main{max-width:1350px;margin:auto;padding:28px}h1{margin:5px 0 20px}.tier{border:1px solid #263b48;border-left:5px solid;padding:20px;margin:18px 0;background:#0d1b25}.dev{border-left-color:#efb84b}.conf{border-left-color:#ff6375}.next{border-left-color:#48c7df}.tag{font:700 12px monospace;letter-spacing:.12em}.dev .tag{color:#efb84b}.conf .tag{color:#ff6375}.next .tag{color:#48c7df}.fail{background:#35151d;border:1px solid #ff6375;padding:12px;font-weight:bold}table{width:100%;border-collapse:collapse;margin:12px 0}th,td{padding:8px;border-bottom:1px solid #213541;text-align:left}th{color:#91a8b5;font:11px monospace}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.kpi{background:#09151e;padding:12px}.kpi strong,.kpi span{display:block}.kpi strong{font-size:22px}.caveat{color:#afbec6;border-left:3px solid #788c97;padding-left:10px}.hash{font:11px monospace;color:#8fa5b2;word-break:break-all}.evidence-plot{width:100%;height:auto;background:#09151e;border:1px solid #213541;margin:12px 0}.plot-bg{fill:#09151e}.gridline{stroke:#203541;stroke-width:1}.axis-label,.point-label,.criterion-label{fill:#afbec6;font:12px Arial}.axis-title{fill:#d5e2e8;font:13px Arial}.criterion{stroke:#ff6375;stroke-width:2;stroke-dasharray:7 5}.criterion-label{fill:#ff8290}.point{fill:#788c97;stroke:#e6eef2;stroke-width:1}.point.pareto{fill:#48c7df;stroke:#c9f7ff;stroke-width:2}.point.infeasible{fill:#ff6375}.zero-line{stroke:#91a8b5;stroke-width:2}.ci-line{stroke:#afbec6;stroke-width:2}.fold-point{stroke:#e6eef2;stroke-width:1}.fold-point.gain{fill:#48c7df}.fold-point.loss{fill:#ff6375}.finding{background:#102632;border:1px solid #315064;padding:12px;margin:12px 0}@media(max-width:800px){.grid{grid-template-columns:1fr 1fr}}"
     doc=f"""<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'><title>CDM Triage Evidence</title><style>{css}</style></head><body><main><div class='tag'>SCIENTIFIC EVIDENCE RECORD · NOT FOR OPERATIONS</div><h1>Sequential CDM Triage · Evidence Dashboard</h1>
-<section id='development' class='tier dev'><div class='tag'>TIER 1 · EXPLORATORY DEVELOPMENT EVIDENCE</div><h2>Safety–automation frontier</h2>{frontier}<div class='finding'><strong>Selected development candidate:</strong> tail-aligned CatBoost retained 12/192 dangerous exclusions (UCB95 {pct(tail['danger_ucb'])}) and increased correct SAFE-EXCLUDE coverage by {100*tail['coverage_delta']:.2f} percentage points (95% CI {100*tail['coverage_delta_ci_low']:.2f} to {100*tail['coverage_delta_ci_high']:.2f}; exact McNemar p={tail['coverage_mcnemar_p']:.3g}).</div><table><tr><th>Method</th><th>Danger</th><th>UCB95</th><th>Safe-negative</th><th>Feasible</th><th>Pareto</th></tr>{devrows}</table><h3>Outer-fold stability of the selected candidate</h3>{foldplot}<p class='caveat'>The pooled automation gain is heterogeneous: folds 1–3 improve, while folds 0 and 4 decline. This is reported as a limitation and motivates the genuinely new validation study; no subgroup-specific safety guarantee is claimed.</p><h3>250 correlated calibration-split repeats</h3><table><tr><th>Method</th><th>Repeats</th><th>Median coverage</th><th>Coverage gain &gt; 0</th><th>Danger not worse</th></tr>{stab}</table><p class='caveat'>Development data only: 7,146 events, 192 positives. Fixed out-of-fold scores were reused across correlated calibration splits; these are not independent retraining replications and are not confirmation evidence.</p><div class='hash'>v10 {file_sha256(a/'development_score_ensemble_v10.json')} · v11 {file_sha256(a/'development_score_ensemble_repeated_v11.json')}</div></section>
-<section id='confirmation' class='tier conf'><div class='tag'>TIER 2 · LOCKED CONFIRMATION_V1 · {'CRITERION MET' if passed else 'CRITERION NOT MET'}</div><h2>Snapshot-model confirmation</h2><div class='fail'>PRE-SPECIFIED CRITERION {'MET' if passed else 'NOT MET'}: UCB {pct(m['danger_ucb'])} {'≤' if passed else '>'} α {pct(criterion)}.</div><div class='grid'><div class='kpi'><span>Dangerous exclusions</span><strong>{m['danger_k']}/{m['danger_n']}</strong></div><div class='kpi'><span>Observed danger</span><strong>{pct(m['danger_rate'])}</strong></div><div class='kpi'><span>Safe-negative</span><strong>{pct(m['safe_negative_rate'])}</strong></div><div class='kpi'><span>Median lead</span><strong>{m['median_first_safe_tca']:.2f} d</strong></div></div><p>PAC rank {cr['rank']}/{cr['n_positive']} · threshold {cr['threshold']:.8g} · calibration bound {pct(cr['pac_bound'])}</p><p class='caveat'>Single immutable historical run for catboost_snapshot. No second run is permitted. This result does not validate the preregistered v13 candidate.</p><div class='hash'>confirmation {file_sha256(c/'confirmation.json')} · lock {file_sha256(c/'confirmation.lock')} · model {cal['model_sha256']}</div></section>
+<section id='development' class='tier dev'><div class='tag'>TIER 1 · EXPLORATORY DEVELOPMENT EVIDENCE</div><h2>Safety–automation frontier</h2>{frontier}<div class='finding'><strong>Selected development candidate:</strong> tail-aligned CatBoost retained 12/192 dangerous exclusions (UCB95 {pct(tail['danger_ucb'])}) and increased correct SAFE-EXCLUDE coverage by {100*tail['coverage_delta']:.2f} percentage points (95% CI {100*tail['coverage_delta_ci_low']:.2f} to {100*tail['coverage_delta_ci_high']:.2f}; exact McNemar p={tail['coverage_mcnemar_p']:.3g}).</div><table><tr><th>Method</th><th>Danger</th><th>UCB95</th><th>Safe-negative</th><th>Feasible</th><th>Pareto</th></tr>{devrows}</table><h3>Outer-fold stability of the selected candidate</h3>{foldplot}<div class='finding'><strong>Fold-level safety diagnostic:</strong> {fold_safety_passes}/{fold_safety_total} folds meet the pooled 10% UCB criterion. Each fold contains only {fold_positive_min}–{fold_positive_max} positive events, so these intervals are imprecise and are not subgroup guarantees.</div><p class='caveat'>The pooled automation gain is heterogeneous: folds 1–3 improve, while folds 0 and 4 decline. This is reported as a limitation and motivates the genuinely new validation study; no subgroup-specific safety guarantee is claimed.</p><h3>250 correlated calibration-split repeats</h3><table><tr><th>Method</th><th>Repeats</th><th>Median coverage</th><th>Coverage gain &gt; 0</th><th>Danger not worse</th></tr>{stab}</table><p class='caveat'>Development data only: 7,146 events, 192 positives. Fixed out-of-fold scores were reused across correlated calibration splits; these are not independent retraining replications and are not confirmation evidence.</p><div class='hash'>v10 {file_sha256(a/'development_score_ensemble_v10.json')} · v11 {file_sha256(a/'development_score_ensemble_repeated_v11.json')}</div></section>
+<section id='confirmation' class='tier conf'><div class='tag'>TIER 2 · LOCKED CONFIRMATION_V1 · {'CRITERION MET' if passed else 'CRITERION NOT MET'}</div><h2>Snapshot-model confirmation</h2><div class='fail'>PRE-SPECIFIED CRITERION {'MET' if passed else 'NOT MET'}: UCB {pct(m['danger_ucb'])} {'≤' if passed else '>'} α {pct(criterion)}.</div><div class='grid'><div class='kpi'><span>Dangerous exclusions</span><strong>{m['danger_k']}/{m['danger_n']}</strong></div><div class='kpi'><span>Observed danger</span><strong>{pct(m['danger_rate'])}</strong></div><div class='kpi'><span>Safe-negative</span><strong>{pct(m['safe_negative_rate'])}</strong></div><div class='kpi'><span>Median lead</span><strong>{m['median_first_safe_tca']:.2f} d</strong></div><div class='kpi'><span>Correct exclusions per 1,000</span><strong>{safe_per_1000:.0f}</strong></div><div class='kpi'><span>Remaining per 1,000</span><strong>{remaining_per_1000:.0f}</strong></div></div><div class='finding'><strong>Historical queue effect:</strong> {safe_per_1000:.0f} correct SAFE-EXCLUDE decisions per 1,000 evaluated events, at a median lead of {m['median_first_safe_tca']:.2f} days. This is a retrospective count, not a staffing or monetary claim.</div><p>PAC rank {cr['rank']}/{cr['n_positive']} · threshold {cr['threshold']:.8g} · calibration bound {pct(cr['pac_bound'])}</p><p class='caveat'>Single immutable historical run for catboost_snapshot. No second run is permitted. This result does not validate the preregistered v13 candidate.</p><div class='hash'>confirmation {file_sha256(c/'confirmation.json')} · lock {file_sha256(c/'confirmation.lock')} · model {cal['model_sha256']}</div></section>
 <section id='preregistered' class='tier next'><div class='tag'>TIER 3 · PREREGISTERED NEXT STUDY · NO OUTCOMES ACCESSED</div><h2>{esc(cand['score'])}</h2><div class='grid'><div class='kpi'><span>Status</span><strong>{esc(pre['status'])}</strong></div><div class='kpi'><span>Calibration positives</span><strong>≥{ns['recommended_calibration_positive_events']}</strong></div><div class='kpi'><span>Evaluation positives</span><strong>≥{ns['recommended_evaluation_positive_events']}</strong></div><div class='kpi'><span>Threshold</span><strong>NOT SET</strong></div></div><p>{esc(cand['model'])}; hard fraction {cand['hard_fraction']}, hard mass {cand['hard_mass']}, {cand['iterations']} iterations, window {cand['decision_window_days'][0]}–{cand['decision_window_days'][1]} d, minimum history {cand['minimum_history']}.</p><h3>Prospective evaluation planning</h3><table><tr><th>Positive events</th><th>Max failures</th><th>UCB at max</th><th>P(pass | true danger=5%)</th></tr>{prow}</table><p class='caveat'>confirmation_v1 was previously unblinded and cannot be reused. v13 has calibration_accessed=false, evaluation_accessed=false, and threshold=null. A genuinely new, disjoint study must be frozen before outcomes are opened.</p><div class='hash'>preregistration {prehash} · planning {planhash} · v13 model {modelhash}</div></section>
 <footer class='caveat'>Dataset: ESA Collision Avoidance Challenge, Zenodo 10.5281/zenodo.4463683, CC BY 4.0. Target is high final calculated collision probability, not collision occurrence. Event-level exchangeability is required; no operational guarantee is claimed under arbitrary shift.</footer></main></body></html>"""
     doc=localize_evidence_document(doc,locale)
     atomic_write(output,doc)
-    return {'confirmation_passed':passed,'danger_ucb':float(m['danger_ucb']),'criterion':criterion,'development_pareto_methods':[x['method'] for x in v10['summary'] if x['pareto_frontier']],'preregistration_frozen':pre['status']=='frozen-before-new-data','next_study_candidate':cand['score'],'calibration_accessed':v13['calibration_accessed'],'evaluation_accessed':v13['evaluation_accessed'],'v13_threshold':v13['threshold'],'locale':locale}
+    return {'confirmation_passed':passed,'danger_ucb':float(m['danger_ucb']),'criterion':criterion,'historical_correct_safe_excludes_per_1000':safe_per_1000,'historical_remaining_per_1000':remaining_per_1000,'candidate_fold_safety_passes':fold_safety_passes,'candidate_fold_safety_total':fold_safety_total,'development_pareto_methods':[x['method'] for x in v10['summary'] if x['pareto_frontier']],'preregistration_frozen':pre['status']=='frozen-before-new-data','next_study_candidate':cand['score'],'calibration_accessed':v13['calibration_accessed'],'evaluation_accessed':v13['evaluation_accessed'],'v13_threshold':v13['threshold'],'locale':locale}
 
 def main():
     p=argparse.ArgumentParser(description='Build the three-tier scientific evidence dashboard'); p.add_argument('--root',type=Path,default=ROOT); p.add_argument('--output',type=Path,required=True); p.add_argument('--locale',choices=sorted(SUPPORTED_LOCALES),default='en'); a=p.parse_args(); print(json.dumps(build_evidence_dashboard(a.root,a.output,locale=a.locale),ensure_ascii=False,indent=2))
