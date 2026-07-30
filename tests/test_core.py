@@ -4108,6 +4108,47 @@ def test_one_command_demo_cleans_staging_on_failure(tmp_path, monkeypatch):
     assert not list(tmp_path.glob(".failed-demo.*"))
 
 
+def test_evidence_dashboard_blocks_nonterminal_confirmation_states(tmp_path):
+    import shutil
+
+    root = Path(__file__).resolve().parents[1]
+    for state in ("not-started", "in-progress", "failed"):
+        copy_root = tmp_path / state
+        shutil.copytree(root / "artifacts", copy_root / "artifacts")
+        shutil.copytree(root / "reports", copy_root / "reports")
+        confirmation_dir = copy_root / "artifacts" / "confirmation_v1"
+        lock = confirmation_dir / "confirmation.lock"
+        result = confirmation_dir / "confirmation.json"
+        confirmation_status_path(lock).unlink(missing_ok=True)
+        if state == "not-started":
+            lock.unlink()
+        elif state == "in-progress":
+            result.unlink()
+        else:
+            write_confirmation_status_sidecar(
+                lock, status="failed", payload={
+                    "failure_type": "ValueError",
+                    "failure_message": "simulated",
+                },
+            )
+        output = tmp_path / f"{state}.html"
+        with np.testing.assert_raises_regex(ValueError, "terminal completed state"):
+            build_evidence_dashboard(copy_root, output)
+        assert not output.exists()
+
+
+def test_evidence_dashboard_accepts_legacy_completed_confirmation(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    assert read_confirmation_status(
+        root / "artifacts" / "confirmation_v1" / "confirmation.lock",
+        root / "artifacts" / "confirmation_v1" / "confirmation.json",
+    )["status"] == "legacy-completed"
+    output = tmp_path / "evidence.html"
+    summary = build_evidence_dashboard(root, output)
+    assert summary["confirmation_terminal_status"] == "legacy-completed"
+    assert output.exists()
+
+
 def test_evidence_dashboard_builds_three_verified_tiers(tmp_path):
     root = Path(__file__).resolve().parents[1]
     output = tmp_path / "evidence.html"
@@ -4115,6 +4156,7 @@ def test_evidence_dashboard_builds_three_verified_tiers(tmp_path):
     document = output.read_text(encoding="utf-8")
 
     assert summary["confirmation_passed"] is False
+    assert summary["confirmation_terminal_status"] == "legacy-completed"
     assert abs(summary["danger_ucb"] - 0.12101499810942579) < 1e-12
     assert summary["criterion"] == 0.10
     assert summary["development_pareto_methods"] == ["catboost_tail_aligned", "minimum"]
