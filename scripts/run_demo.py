@@ -37,9 +37,28 @@ DEMO_ARTIFACTS = (
 )
 
 
-def verify_demo_bundle(output_dir: Path) -> dict:
-    """Verify the generated demo against the digests stored in summary.json."""
+DEMO_INPUTS = {
+    "confirmation_evaluation_scores": "artifacts/confirmation_v1/evaluation_scores.parquet",
+    "confirmation_calibration": "artifacts/confirmation_v1/calibration.json",
+    "confirmation_result": "artifacts/confirmation_v1/confirmation.json",
+    "confirmation_lock": "artifacts/confirmation_v1/confirmation.lock",
+    "development_event_aligned_manifest": "artifacts/development_event_aligned_v8.json",
+    "development_oof_scores": "artifacts/development_event_aligned_oof_v8.parquet",
+    "development_score_ensemble_manifest": "artifacts/development_score_ensemble_v10.json",
+    "development_repeated_stability_manifest": "artifacts/development_score_ensemble_repeated_v11.json",
+    "development_fold_diagnostics": "reports/development_score_ensemble_folds_v10.csv",
+    "next_validation_planning": "reports/next_validation_sample_size_v12.csv",
+    "next_validation_preregistration": "artifacts/next_validation_preregistration_v12.json",
+    "next_validation_preregistration_lock": "artifacts/next_validation_preregistration_v12.lock",
+    "v13_model_manifest": "artifacts/catboost_tail_aligned_final_v13.json",
+    "v13_model": "artifacts/catboost_tail_aligned_final_v13.cbm",
+}
+
+
+def verify_demo_bundle(output_dir: Path, root: Path = ROOT) -> dict:
+    """Verify generated outputs and the exact source artifacts used by the demo."""
     output_dir = output_dir.resolve()
+    root = root.resolve()
     summary_path = output_dir / "summary.json"
     if not summary_path.exists():
         raise FileNotFoundError(f"Demo summary is missing: {summary_path}")
@@ -47,6 +66,18 @@ def verify_demo_bundle(output_dir: Path) -> dict:
     expected = summary.get("bundle_verification", {}).get("artifacts")
     if not isinstance(expected, dict) or set(expected) != set(DEMO_ARTIFACTS):
         raise ValueError("Demo summary has an invalid artifact digest roster")
+    expected_inputs = summary.get("input_artifacts")
+    if not isinstance(expected_inputs, dict) or set(expected_inputs) != set(DEMO_INPUTS):
+        raise ValueError("Demo summary has an invalid input artifact digest roster")
+    verified_inputs = {}
+    for name, relative_path in DEMO_INPUTS.items():
+        path = root / relative_path
+        if not path.is_file():
+            raise FileNotFoundError(f"Demo input artifact is missing: {path}")
+        actual = file_sha256(path)
+        if actual != expected_inputs[name]:
+            raise ValueError(f"Demo input artifact SHA-256 mismatch: {name}")
+        verified_inputs[name] = actual
     verified = {}
     for name in DEMO_ARTIFACTS:
         path = output_dir / name
@@ -59,6 +90,7 @@ def verify_demo_bundle(output_dir: Path) -> dict:
     return {
         "status": "VERIFIED",
         "artifacts": verified,
+        "input_artifacts": verified_inputs,
         "summary": "summary.json",
     }
 
@@ -77,9 +109,12 @@ def run_demo(output_dir: Path, root: Path = ROOT, locale: str = "en") -> dict:
     calibration = root / "artifacts" / "confirmation_v1" / "calibration.json"
     confirmation = root / "artifacts" / "confirmation_v1" / "confirmation.json"
     preregistration = root / "artifacts" / "next_validation_preregistration_v12.json"
-    for path in (scores, calibration, confirmation, preregistration):
+    input_artifacts = {}
+    for name, relative_path in DEMO_INPUTS.items():
+        path = root / relative_path
         if not path.exists():
             raise FileNotFoundError(f"Required historical artifact is missing: {path}")
+        input_artifacts[name] = file_sha256(path)
 
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=output_dir.parent))
@@ -108,6 +143,7 @@ def run_demo(output_dir: Path, root: Path = ROOT, locale: str = "en") -> dict:
                 "status": "VERIFIED",
                 "artifacts": bundle_artifacts,
             },
+            "input_artifacts": input_artifacts,
             "locale": locale,
             "output_directory": str(output_dir),
             "audit": "replay-audit.parquet",
@@ -136,9 +172,11 @@ def run_demo(output_dir: Path, root: Path = ROOT, locale: str = "en") -> dict:
             output_dir.rmdir()
         staging.replace(output_dir)
         staging = None
-        verified = verify_demo_bundle(output_dir)
+        verified = verify_demo_bundle(output_dir, root=root)
         if verified["artifacts"] != summary["bundle_verification"]["artifacts"]:
             raise ValueError("Published demo bundle verification changed after commit")
+        if verified["input_artifacts"] != summary["input_artifacts"]:
+            raise ValueError("Published demo input lineage changed after commit")
         return summary
     finally:
         if staging is not None:

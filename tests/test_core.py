@@ -3752,6 +3752,18 @@ def test_one_command_demo_builds_verified_outputs(tmp_path):
     assert stored["evidence"]["confirmation_passed"] is False
     assert stored["batch_chain"] == summary["batch_chain"]
     assert stored["bundle_verification"]["status"] == "VERIFIED"
+    assert set(stored["input_artifacts"]) == {
+        "confirmation_evaluation_scores", "confirmation_calibration",
+        "confirmation_result", "confirmation_lock",
+        "development_event_aligned_manifest", "development_oof_scores",
+        "development_score_ensemble_manifest",
+        "development_repeated_stability_manifest",
+        "development_fold_diagnostics", "next_validation_planning",
+        "next_validation_preregistration",
+        "next_validation_preregistration_lock",
+        "v13_model_manifest", "v13_model",
+    }
+    assert all(len(digest) == 64 for digest in stored["input_artifacts"].values())
     assert set(stored["bundle_verification"]["artifacts"]) == {
         "replay-audit.parquet", "operator-console.html",
         "runtime-state.json", "evidence-dashboard.html",
@@ -3760,9 +3772,10 @@ def test_one_command_demo_builds_verified_outputs(tmp_path):
         len(digest) == 64
         for digest in stored["bundle_verification"]["artifacts"].values()
     )
-    verified = verify_demo_bundle(output)
+    verified = verify_demo_bundle(output, root=root)
     assert verified["status"] == "VERIFIED"
     assert verified["artifacts"] == stored["bundle_verification"]["artifacts"]
+    assert verified["input_artifacts"] == stored["input_artifacts"]
     console = (output / "operator-console.html").read_text(encoding="utf-8")
     assert "NOT MET" in console
     assert "Batch chain" in console
@@ -3782,7 +3795,20 @@ def test_demo_bundle_verification_rejects_tampered_artifact(tmp_path):
     with np.testing.assert_raises_regex(
         ValueError, "operator-console.html"
     ):
-        verify_demo_bundle(output)
+        verify_demo_bundle(output, root=root)
+
+
+def test_demo_bundle_verification_rejects_input_lineage_drift(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    output = tmp_path / "historical-demo"
+    run_demo(output, root=root)
+    summary_path = output / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["input_artifacts"]["v13_model"] = "0" * 64
+    summary_path.write_text(json.dumps(summary) + "\n", encoding="utf-8")
+
+    with np.testing.assert_raises_regex(ValueError, "v13_model"):
+        verify_demo_bundle(output, root=root)
 
 
 def test_demo_bundle_verification_rejects_incomplete_digest_roster(tmp_path):
@@ -3797,7 +3823,7 @@ def test_demo_bundle_verification_rejects_incomplete_digest_roster(tmp_path):
     with np.testing.assert_raises_regex(
         ValueError, "invalid artifact digest roster"
     ):
-        verify_demo_bundle(output)
+        verify_demo_bundle(output, root=root)
 
 
 def test_one_command_demo_refuses_protected_and_nonempty_output(tmp_path):
@@ -3849,6 +3875,8 @@ def test_evidence_dashboard_builds_three_verified_tiers(tmp_path):
     assert summary["oof_verification_passed"] is True
     assert summary["oof_verification_checks"] == 40
     assert summary["oof_verification_schema"] == 2
+    assert summary["oof_fold_crosscheck_passed"] is True
+    assert len(summary["folds_csv_sha256"]) == 64
     assert len(summary["oof_fold_results"]) == 5
     assert "id='development'" in document
     assert "id='confirmation'" in document
@@ -3883,6 +3911,46 @@ def test_evidence_dashboard_embeds_frontier_and_fold_stability(tmp_path):
     assert "313" in document and "Remaining per 1,000" in document
     assert "not confirmation evidence" in document
     assert "https://" not in document
+
+
+def test_oof_fold_results_match_independent_fold_diagnostics():
+    root = Path(__file__).resolve().parents[1]
+    result = verify_oof_evidence(
+        root / "artifacts" / "development_event_aligned_oof_v8.parquet",
+        root / "artifacts" / "development_event_aligned_v8.json",
+        root / "artifacts" / "catboost_tail_aligned_final_v13.json",
+        root / "artifacts" / "catboost_tail_aligned_final_v13.cbm",
+        root / "artifacts" / "next_validation_preregistration_v12.json",
+        root / "artifacts" / "next_validation_preregistration_v12.lock",
+    )
+    folds = pd.read_csv(root / "reports" / "development_score_ensemble_folds_v10.csv")
+    folds = folds.loc[folds["method"].eq("catboost_tail_aligned")].set_index("fold")
+    for live in result["fold_results"]:
+        stored = folds.loc[live["fold"]]
+        for field in ("danger_k", "danger_n", "safe_negative", "negative_n"):
+            assert live[field] == int(stored[field])
+        for field in (
+            "danger_rate", "danger_ucb", "safe_negative_rate",
+            "median_first_safe_tca_days",
+        ):
+            assert abs(live[field] - float(stored[field])) <= 1e-12
+
+
+def test_evidence_dashboard_rejects_fold_diagnostic_divergence(tmp_path):
+    import shutil
+
+    root = Path(__file__).resolve().parents[1]
+    copy_root = tmp_path / "copy"
+    shutil.copytree(root / "artifacts", copy_root / "artifacts")
+    shutil.copytree(root / "reports", copy_root / "reports")
+    path = copy_root / "reports" / "development_score_ensemble_folds_v10.csv"
+    folds = pd.read_csv(path)
+    mask = folds["method"].eq("catboost_tail_aligned") & folds["fold"].eq(0)
+    folds.loc[mask, "danger_k"] = 9
+    folds.to_csv(path, index=False)
+
+    with np.testing.assert_raises_regex(ValueError, "fold 0 danger_k"):
+        build_evidence_dashboard(copy_root, tmp_path / "evidence.html")
 
 
 def test_evidence_planning_validation_rejects_recomputed_claim_mismatch():
