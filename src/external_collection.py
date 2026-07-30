@@ -15,8 +15,13 @@ import pandas as pd
 
 try:
     import fcntl
-except ImportError:  # pragma: no cover - POSIX production target
+except ImportError:  # pragma: no cover - Windows
     fcntl = None
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None
 
 from external_cdm import (
     adapt_external_cdms,
@@ -32,18 +37,31 @@ SCHEMA_VERSION = 2
 
 @contextmanager
 def ledger_lock(ledger_path: str | Path):
-    """Serialize ledger mutations with a crash-released POSIX advisory lock."""
-    if fcntl is None:
-        raise RuntimeError("External collection locking requires POSIX fcntl")
+    """Serialize ledger mutations with an OS advisory lock."""
+    if fcntl is None and msvcrt is None:
+        raise RuntimeError("External collection locking is unavailable on this platform")
     ledger_path = Path(ledger_path)
     lock_path = ledger_path.with_suffix(ledger_path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+b") as stream:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        if fcntl is not None:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        else:
+            stream.seek(0)
+            if stream.read(1) == b"":
+                stream.write(b"\0")
+                stream.flush()
+                os.fsync(stream.fileno())
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
         try:
             yield lock_path
         finally:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            else:
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _atomic_json(payload: dict[str, Any], path: Path) -> None:
