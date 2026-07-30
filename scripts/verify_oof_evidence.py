@@ -147,7 +147,7 @@ def verify_oof_evidence(
     record("oof_required_columns", not missing, missing, [])
     if missing:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "development-only-oof-verification",
             "passed": False,
             "note": (
@@ -157,6 +157,7 @@ def verify_oof_evidence(
             ),
             "artifacts": {"oof_sha256": oof_sha256},
             "checks": checks,
+            "fold_results": None,
             "recomputed_metrics": None,
         }
 
@@ -216,6 +217,7 @@ def verify_oof_evidence(
     decisions = []
     thresholds: list[float] = []
     ranks: list[int] = []
+    fold_results: list[dict[str, Any]] = []
     for fold in folds:
         calibration = oof.loc[oof["fold"] != fold]
         held_out = oof.loc[oof["fold"] == fold]
@@ -236,8 +238,41 @@ def verify_oof_evidence(
         )
         held_out_decisions["fold"] = fold
         decisions.append(held_out_decisions)
-        thresholds.append(float(rule["threshold"]))
-        ranks.append(int(rule["rank"]))
+        threshold = float(rule["threshold"])
+        rank = int(rule["rank"])
+        thresholds.append(threshold)
+        ranks.append(rank)
+        fold_positive = held_out_decisions["y"] == 1
+        fold_negative = ~fold_positive
+        fold_dangerous = held_out_decisions["safe_exclude"] & fold_positive
+        fold_safe_negative = held_out_decisions["safe_exclude"] & fold_negative
+        fold_danger_k = int(fold_dangerous.sum())
+        fold_danger_n = int(fold_positive.sum())
+        fold_safe_negative_count = int(fold_safe_negative.sum())
+        fold_negative_n = int(fold_negative.sum())
+        fold_first_safe = held_out_decisions.loc[
+            fold_safe_negative, "first_safe_tca"
+        ]
+        fold_results.append({
+            "fold": int(fold),
+            "calibration_positive_events": int(
+                (calibration_events["y"] == 1).sum()
+            ),
+            "rank": rank,
+            "threshold": threshold,
+            "danger_k": fold_danger_k,
+            "danger_n": fold_danger_n,
+            "danger_rate": float(fold_danger_k / fold_danger_n),
+            "danger_ucb": cp_upper(fold_danger_k, fold_danger_n, confidence),
+            "safe_negative": fold_safe_negative_count,
+            "negative_n": fold_negative_n,
+            "safe_negative_rate": float(
+                fold_safe_negative_count / fold_negative_n
+            ),
+            "median_first_safe_tca_days": (
+                None if fold_first_safe.empty else float(fold_first_safe.median())
+            ),
+        })
 
     event_decisions = pd.concat(decisions, ignore_index=True)
     positive = event_decisions["y"] == 1
@@ -285,7 +320,7 @@ def verify_oof_evidence(
         record(f"metric_{name}", passed, recomputed[name], expected)
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "development-only-oof-verification",
         "passed": all(check["passed"] for check in checks),
         "note": (
@@ -306,6 +341,7 @@ def verify_oof_evidence(
             "preregistration_lock_sha256": preregistration_lock_sha256,
         },
         "checks": checks,
+        "fold_results": fold_results,
         "recomputed_metrics": recomputed,
     }
 

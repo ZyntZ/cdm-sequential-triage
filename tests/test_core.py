@@ -3846,6 +3846,10 @@ def test_evidence_dashboard_builds_three_verified_tiers(tmp_path):
     assert abs(summary["historical_remaining_per_1000"] - 313.1889015583428) < 1e-12
     assert summary["candidate_fold_safety_passes"] == 1
     assert summary["candidate_fold_safety_total"] == 5
+    assert summary["oof_verification_passed"] is True
+    assert summary["oof_verification_checks"] == 40
+    assert summary["oof_verification_schema"] == 2
+    assert len(summary["oof_fold_results"]) == 5
     assert "id='development'" in document
     assert "id='confirmation'" in document
     assert "id='preregistered'" in document
@@ -3871,6 +3875,9 @@ def test_evidence_dashboard_embeds_frontier_and_fold_stability(tmp_path):
     assert "12/192 dangerous exclusions" in document
     assert "2.43 percentage points" in document
     assert "1/5 folds meet the pooled 10% UCB criterion" in document
+    assert "Live OOF evidence verification" in document
+    assert "40/40 integrity and metric checks passed" in document
+    assert "verifier schema 2" in document
     assert "38–39 positive events" in document
     assert "687 correct SAFE-EXCLUDE decisions per 1,000" in document
     assert "313" in document and "Remaining per 1,000" in document
@@ -3977,6 +3984,24 @@ def test_operator_dashboard_rejects_tampered_calibration_rule(tmp_path):
 
     with np.testing.assert_raises_regex(ValueError, "PAC bound"):
         build_dashboard([audit_path], calibration, output)
+    assert not output.exists()
+
+
+def test_evidence_dashboard_rejects_tampered_oof_scores(tmp_path):
+    import shutil
+
+    root = Path(__file__).resolve().parents[1]
+    copy_root = tmp_path / "copy"
+    shutil.copytree(root / "artifacts", copy_root / "artifacts")
+    shutil.copytree(root / "reports", copy_root / "reports")
+    oof_path = copy_root / "artifacts" / "development_event_aligned_oof_v8.parquet"
+    oof = pd.read_parquet(oof_path)
+    oof.loc[0, "catboost_tail_aligned"] = 2.0
+    oof.to_parquet(oof_path, index=False)
+
+    output = tmp_path / "evidence.html"
+    with np.testing.assert_raises_regex(ValueError, "OOF evidence verification failed"):
+        build_evidence_dashboard(copy_root, output)
     assert not output.exists()
 
 
@@ -4444,9 +4469,15 @@ def test_oof_evidence_verification_matches_frozen_development_artifacts():
         root / "artifacts" / "next_validation_preregistration_v12.lock",
     )
 
+    assert result["schema_version"] == 2
     assert result["status"] == "development-only-oof-verification"
     assert result["passed"] is True
     assert len(result["checks"]) == 40
+    assert [row["fold"] for row in result["fold_results"]] == [0, 1, 2, 3, 4]
+    assert sum(row["danger_k"] for row in result["fold_results"]) == 12
+    assert sum(row["danger_n"] for row in result["fold_results"]) == 192
+    assert min(row["rank"] for row in result["fold_results"]) == 9
+    assert max(row["rank"] for row in result["fold_results"]) == 10
     assert result["recomputed_metrics"]["danger_k"] == 12
     assert result["recomputed_metrics"]["danger_n"] == 192
     assert result["recomputed_metrics"]["safe_negative"] == 5286
