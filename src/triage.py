@@ -590,6 +590,17 @@ class SequentialTriagePolicy:
             if policy.shift_gate is None:
                 if decision.shift_score is not None or not decision.shift_gate_allowed:
                     raise ValueError("Checkpoint shift-gate fields are inconsistent")
+            else:
+                if decision.shift_score is None:
+                    raise ValueError("Checkpoint shift score is missing for an active gate")
+                expected_gate_allowed = bool(
+                    np.isfinite(decision.shift_score)
+                    and decision.shift_score <= policy.shift_gate.calibration_.threshold
+                )
+                if decision.shift_gate_allowed != expected_gate_allowed:
+                    raise ValueError(
+                        "Checkpoint shift-gate decision is inconsistent with its score"
+                    )
             expected_decision, expected_reason = policy._decision_for_update(
                 time_to_tca=decision.time_to_tca,
                 score=decision.score,

@@ -4770,6 +4770,46 @@ def test_restore_rejects_forged_decision_reason_with_valid_digest(tmp_path):
         SequentialTriagePolicy.restore(checkpoint)
 
 
+def test_restore_rejects_forged_shift_gate_decision_with_valid_digest(tmp_path):
+    proper = pd.DataFrame({"risk": [-9.0, -8.5, -8.0, -7.5, -7.0]})
+    calibration = pd.DataFrame({"risk": np.linspace(-9.0, -7.0, 39)})
+    gate = ConformalShiftGate(["risk"]).fit(proper)
+    gate.calibrate(calibration, alpha=0.10)
+    policy = SequentialTriagePolicy(0.20, shift_gate=gate)
+    policy.update("event", 5.0, 0.10)
+    checkpoint = tmp_path / "gated-runtime.json"
+    policy.checkpoint(checkpoint)
+    _rewrite_checkpoint_with_valid_digest(
+        checkpoint,
+        lambda payload: payload["audit"][0].update({
+            "shift_gate_allowed": True,
+            "decision": "SAFE-EXCLUDE",
+            "reason": "score_at_or_below_calibrated_threshold",
+        }),
+    )
+
+    with np.testing.assert_raises_regex(ValueError, "shift-gate decision"):
+        SequentialTriagePolicy.restore(checkpoint, shift_gate=gate)
+
+
+def test_restore_rejects_shift_score_missing_with_active_gate(tmp_path):
+    proper = pd.DataFrame({"risk": [-9.0, -8.5, -8.0, -7.5, -7.0]})
+    calibration = pd.DataFrame({"risk": np.linspace(-9.0, -7.0, 39)})
+    gate = ConformalShiftGate(["risk"]).fit(proper)
+    gate.calibrate(calibration, alpha=0.10)
+    policy = SequentialTriagePolicy(0.20, shift_gate=gate)
+    policy.update("event", 5.0, 0.10, {"risk": -8.0})
+    checkpoint = tmp_path / "gated-runtime.json"
+    policy.checkpoint(checkpoint)
+    _rewrite_checkpoint_with_valid_digest(
+        checkpoint,
+        lambda payload: payload["audit"][0].update({"shift_score": None}),
+    )
+
+    with np.testing.assert_raises_regex(ValueError, "shift score is missing"):
+        SequentialTriagePolicy.restore(checkpoint, shift_gate=gate)
+
+
 def test_restore_rejects_shift_gate_fields_without_gate(tmp_path):
     policy = SequentialTriagePolicy(safe_threshold=0.20)
     policy.update("event", 7.0, 0.10)
