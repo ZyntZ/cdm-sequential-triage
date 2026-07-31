@@ -3966,7 +3966,7 @@ def test_operator_dashboard_lists_two_processed_batches(tmp_path):
     assert summary["chain"]["length"] == 2
     assert summary["chain"]["displayed_rows"] == 2
     assert summary["chain"]["clipped"] is False
-    assert "PROCESSED BATCH CHAIN" in document
+    assert "Processed batches" in document
     assert file_sha256(first_scores)[:16] in document
     assert file_sha256(second_scores)[:16] in document
     assert "GENESIS" in document
@@ -4097,8 +4097,8 @@ def test_one_command_demo_builds_verified_outputs(tmp_path):
     assert "NOT MET" in console
     assert "Batch chain" in console
     assert "VERIFIED" in console
-    assert "JUDGE BRIEFING" in console
-    assert "DETERMINISTIC SHOWCASE" in console
+    assert "Key figures" in console
+    assert "Example trajectory" in console
     assert "22,656" in console
     assert "2,387" in console
     assert "687" in console
@@ -4365,10 +4365,10 @@ def test_russian_demo_localizes_operator_and_evidence_dashboards(tmp_path):
     assert summary["evidence"]["locale"] == "ru"
     assert "<html lang='ru'>" in operator
     assert "Операторская консоль" in operator
-    assert "АКТИВНАЯ ОЧЕРЕДЬ СОБЫТИЙ" in operator
+    assert "Очередь событий" in operator
     assert "НЕ ВЫПОЛНЕН" in operator
     assert "<html lang='ru'>" in evidence
-    assert "Доказательная панель" in evidence
+    assert "Последовательный триаж CDM · результаты" in evidence
     assert "Граница безопасность–автоматизация" in evidence
     assert "КРИТЕРИЙ НЕ ВЫПОЛНЕН" in evidence
     assert "Диагностика безопасности по folds" in evidence

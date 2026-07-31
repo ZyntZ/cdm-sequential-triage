@@ -126,12 +126,12 @@ def localize_operator_document(document: str, locale: str) -> str:
     replacements = [
         ("<html lang='en'>", "<html lang='ru'>"),
         ("CDM Triage Operator Console", "Операторская консоль триажа CDM"),
-        ("SPACE TRAFFIC · DECISION SUPPORT", "КОСМИЧЕСКОЕ ДВИЖЕНИЕ · ПОДДЕРЖКА РЕШЕНИЙ"),
+        ("Decision support for conjunction events", "Поддержка решений по событиям сближения"),
         ("Sequential CDM Triage · Operator Console", "Последовательный триаж CDM · Операторская консоль"),
         ("Calibrated event-level exclusion policy with auditable message-by-message decisions", "Калиброванная event-level политика с аудитом решения после каждого сообщения"),
-        ("HISTORICAL DEMO · NOT FOR OPERATIONS", "ИСТОРИЧЕСКАЯ ДЕМОНСТРАЦИЯ · НЕ ДЛЯ ЭКСПЛУАТАЦИИ"),
-        ("CURRENT RUNTIME STATE", "ТЕКУЩЕЕ СОСТОЯНИЕ"),
-        ("JUDGE BRIEFING", "КРАТКО ДЛЯ ЭКСПЕРТА"),
+        ("Historical replay · not for operations", "Историческое воспроизведение · не для эксплуатации"),
+        ("Current state", "Текущее состояние"),
+        ("Key figures", "Основные показатели"),
         ("This historical replay processed", "В историческом воспроизведении обработано"),
         ("CDM updates across", "обновлений CDM по"),
         ("event trajectories in the decision window.", "траекториям событий в рабочем окне."),
@@ -142,7 +142,7 @@ def localize_operator_document(document: str, locale: str) -> str:
         ("criterion.", "критерии."),
         ("correct SAFE-EXCLUDE decisions per 1,000 evaluated events at a median lead of", "корректных решений SAFE-EXCLUDE на 1 000 оценённых событий при медианном упреждении"),
         ("The preregistered v13 candidate remains unopened and is not validated by confirmation_v1.", "Предзарегистрированный кандидат v13 остаётся нераскрытым и не подтверждается результатом confirmation_v1."),
-        ("DETERMINISTIC SHOWCASE", "ВОСПРОИЗВОДИМЫЙ ПРИМЕР"),
+        ("Example trajectory", "Пример траектории"),
         ("Selected by a frozen display rule: latest decision SAFE-EXCLUDE, a prior MONITOR step, then maximum lead time and trajectory length.", "Выбран фиксированным правилом отображения: последнее решение SAFE-EXCLUDE, ранее был MONITOR, затем максимальное упреждение и длина траектории."),
         ("First SAFE-EXCLUDE at message", "Первый SAFE-EXCLUDE на сообщении"),
         ("updates in the trajectory", "обновлений в траектории"),
@@ -154,21 +154,21 @@ def localize_operator_document(document: str, locale: str) -> str:
         ("length", "длина"), ("showing", "показано"), ("events", "событий"),
         ("gate: active", "gate: активен"), ("events blocked", "событий заблокировано"),
         ("gate: not active", "gate: не активен"),
-        ("ACTIVE EVENT QUEUE", "АКТИВНАЯ ОЧЕРЕДЬ СОБЫТИЙ"),
+        ("Event queue", "Очередь событий"),
         ("Current decision", "Текущее решение"), ("Event", "Событие"),
         ("Score", "Score"), ("History", "История"), ("Reason", "Причина"),
-        ("FROZEN POLICY", "ЗАМОРОЖЕННАЯ ПОЛИТИКА"),
+        ("Policy settings", "Параметры политики"),
         ("SAFE-EXCLUDE removes an event from the current manual-review queue while automated ingestion continues. It is not a maneuver command.", "SAFE-EXCLUDE исключает событие из текущей очереди ручного анализа, но автоматический приём новых CDM продолжается. Это не команда на манёвр."),
-        ("EVENT DECISION TIMELINE", "ИСТОРИЯ РЕШЕНИЙ ПО СОБЫТИЮ"),
+        ("Decision history", "История решений"),
         ("Decision explanation", "Объяснение решения"),
         ("First SAFE-EXCLUDE", "Первый SAFE-EXCLUDE"),
-        ("ARTIFACT LINEAGE", "ПРОИСХОЖДЕНИЕ АРТЕФАКТОВ"),
+        ("Artifact checksums", "Контрольные суммы артефактов"),
         ("Artifact", "Артефакт"), ("shift gate", "shift gate"),
-        ("PROCESSED BATCH CHAIN", "ЦЕПОЧКА ОБРАБОТАННЫХ ПАКЕТОВ"),
+        ("Processed batches", "Обработанные пакеты"),
         ("CDM rows", "Строки CDM"), ("Min TCA, d", "Мин. TCA, сут."),
         ("Max TCA, d", "Макс. TCA, сут."), ("Audit rows", "Строки аудита"),
         ("Previous entry", "Предыдущая запись"),
-        ("LOCKED CONFIRMATION EVIDENCE", "ЗАМОРОЖЕННОЕ ПОДТВЕРЖДАЮЩЕЕ ДОКАЗАТЕЛЬСТВО"),
+        ("Confirmation result", "Результат подтверждающего эксперимента"),
         ("Dangerous exclusions", "Опасные исключения"),
         ("Observed event rate", "Наблюдаемая доля"),
         ("One-sided 95% UCB", "Односторонняя 95%-я UCB"),
@@ -503,7 +503,7 @@ def build_dashboard(
             )
             confirmation_summary["median_first_safe_tca"] = float(metrics["median_first_safe_tca"])
         confirmation_html = f"""
-<section class='panel evidence'><div class='panel-title'>LOCKED CONFIRMATION EVIDENCE</div><div class='evidence-grid'>
+<section class='panel evidence'><div class='panel-title'>Confirmation result</div><div class='evidence-grid'>
 <div><span>Dangerous exclusions</span><strong>{int(metrics['danger_k'])}/{int(metrics['danger_n'])}</strong></div>
 <div><span>Observed event rate</span><strong>{100*float(metrics['danger_rate']):.2f}%</strong></div>
 <div class='{'pass' if passed else 'fail'}'><span>One-sided 95% UCB</span><strong>{100*float(metrics['danger_ucb']):.2f}%</strong><small>criterion ≤ {100*criterion:.2f}% · {'MET' if passed else 'NOT MET'}</small></div>
@@ -538,7 +538,7 @@ def build_dashboard(
         )
     briefing_html = (
         "<section id='judge-briefing' class='panel summary briefing'>"
-        "<div class='panel-title'>JUDGE BRIEFING</div>"
+        "<div class='panel-title'>Key figures</div>"
         f"<p>This historical replay processed <strong>{updates:,}</strong> CDM updates "
         f"across <strong>{events:,}</strong> event trajectories in the decision window.</p>"
         f"<p>Current queue: <strong>{decision_breakdown}</strong>.</p>"
@@ -555,7 +555,7 @@ def build_dashboard(
     if monitor_to_safe_showcase is not None:
         showcase_html = (
             "<section id='deterministic-showcase' class='panel summary briefing'>"
-            "<div class='panel-title'>DETERMINISTIC SHOWCASE</div>"
+            "<div class='panel-title'>Example trajectory</div>"
             "<p>Selected by a frozen display rule: latest decision SAFE-EXCLUDE, a prior "
             "MONITOR step, then maximum lead time and trajectory length.</p>"
             f"<p>Event <strong>{_escape(monitor_to_safe_showcase['event_id'])}</strong> · "
@@ -614,18 +614,18 @@ def build_dashboard(
             if chain_summary["clipped"] else ""
         )
         chain_table_html = f"""
-<section class='panel summary'><div class='panel-title'>PROCESSED BATCH CHAIN</div>
+<section class='panel summary'><div class='panel-title'>Processed batches</div>
 <div class='table-wrap'><table><thead><tr><th>#</th><th>CDM rows</th><th>Events</th><th>Min TCA, d</th><th>Max TCA, d</th><th>Audit rows</th><th>Scores SHA-256</th><th>Entry SHA-256</th><th>Previous entry</th></tr></thead><tbody>{''.join(chain_rows)}</tbody></table></div>
 <div class='source'>status {_escape(chain_summary['status'])} · head {_escape(chain_summary['head_sha256'])}{clipped_note}</div></section>"""
 
     document = f"""<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>CDM Triage Operator Console</title>
-<style>:root{{--bg:#071018;--panel:#0c1822;--line:#20313d;--text:#e7f0f4;--muted:#8fa5b2;--safe:#51d18a;--monitor:#f1bb4b;--danger:#ff6677;--cyan:#48c7df}}*{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(circle at top right,#122b38,#071018 42%);color:var(--text);font:14px/1.45 Inter,Segoe UI,Arial,sans-serif}}main{{max-width:1500px;margin:auto;padding:24px}}header{{display:flex;justify-content:space-between;gap:24px;align-items:flex-end;border-bottom:1px solid var(--line);padding-bottom:18px}}h1{{margin:0;font-size:28px}}.eyebrow,.panel-title{{color:var(--cyan);font:12px monospace;letter-spacing:.15em}}.status{{border:1px solid var(--monitor);color:var(--monitor);padding:8px 12px;border-radius:4px;font-weight:700}}.grid{{display:grid;grid-template-columns:repeat(12,1fr);gap:16px;margin-top:16px}}.panel{{background:linear-gradient(180deg,#10222d,#09161f);border:1px solid var(--line);border-radius:8px;padding:18px;box-shadow:0 12px 30px #0003}}.summary,.evidence{{grid-column:span 12}}.briefing p{{margin:8px 0;font-size:15px}}.active,.timeline{{grid-column:span 8}}.policy,.lineage{{grid-column:span 4}}.panel-title{{margin-bottom:14px;font-weight:700}}.kpis,.evidence-grid{{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}}.kpi,.evidence-grid div{{background:#09151e;padding:13px;border-left:3px solid var(--cyan)}}.kpi span,.kpi small,.evidence-grid span,.evidence-grid small{{display:block;color:var(--muted)}}.kpi strong,.evidence-grid strong{{font-size:25px}}.kpi.safe{{border-color:var(--safe)}}.kpi.monitor{{border-color:var(--monitor)}}.kpi.escalate,.evidence-grid .fail{{border-color:var(--danger)}}.evidence-grid .pass{{border-color:var(--safe)}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px 10px;border-bottom:1px solid #182a36;text-align:left}}th{{color:var(--muted);font:11px monospace}}.num{{font-family:monospace;text-align:right}}.event{{font-family:monospace}}.reason,.source{{color:var(--muted);font-size:12px}}.table-wrap{{overflow:auto;max-height:620px}}.badge{{padding:3px 7px;border-radius:3px;font:700 11px monospace}}.badge.safe{{color:var(--safe);background:#0f3024}}.badge.monitor{{color:var(--monitor);background:#332713}}.badge.escalate{{color:var(--danger);background:#341722}}select{{background:#09151e;color:var(--text);border:1px solid var(--line);padding:8px;width:100%;margin-bottom:12px}}.timeline-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px}}.step{{padding:10px;border:1px solid var(--line);background:#09151e}}.step strong,.step span{{display:block}}.step span{{color:var(--muted);font-size:12px}}.caveat{{border-left:3px solid var(--danger);padding:10px;background:#21131a}}.source{{margin-top:12px;font-family:monospace;word-break:break-all}}footer{{margin:22px 0;color:var(--muted);font-size:12px}}@media(max-width:980px){{.active,.policy,.timeline,.lineage{{grid-column:span 12}}.kpis,.evidence-grid{{grid-template-columns:1fr 1fr}}header{{flex-direction:column;align-items:flex-start}}}}@media print{{body{{background:#fff;color:#000}}main{{max-width:none;padding:0}}header{{border-color:#777}}.panel{{background:#fff;border:1px solid #aaa;box-shadow:none;break-inside:avoid}}.kpi,.evidence-grid div{{background:#f5f5f5}}.status,.caveat,.source,.reason{{color:#000;border-color:#000}}select,footer,.active,.lineage{{display:none}}.timeline{{grid-column:span 12}}.table-wrap{{max-height:none;overflow:visible}}.badge.safe{{color:#176b38;background:#e6f4ec}}.badge.monitor{{color:#6b5000;background:#fdf6e3}}.badge.escalate{{color:#8d001c;background:#fdecea}}}}</style></head><body><main>
-<header><div><div class='eyebrow'>SPACE TRAFFIC · DECISION SUPPORT</div><h1>Sequential CDM Triage · Operator Console</h1><div>Calibrated event-level exclusion policy with auditable message-by-message decisions</div></div><div class='status'>HISTORICAL DEMO · NOT FOR OPERATIONS</div></header><div class='grid'>
-<section class='panel summary'><div class='panel-title'>CURRENT RUNTIME STATE</div><div class='kpis'><div class='kpi'><span>Active events</span><strong>{events}</strong><small>across {len(audit_paths)} batch(es)</small></div><div class='kpi'><span>Processed updates</span><strong>{updates}</strong><small>message-level count</small></div>{cards}{chain_card}</div><div class='source'>gate: {'active · '+str(audit.loc[blocked,'__event_key'].nunique())+' events blocked' if gate_active else 'not active'} · showing {len(shown)} of {events} events</div></section>{briefing_html}{showcase_html}
-<section class='panel active'><div class='panel-title'>ACTIVE EVENT QUEUE</div><div class='table-wrap'><table><thead><tr><th>Event</th><th>Current decision</th><th>Score</th><th>TCA, d</th><th>Seq</th><th>History</th><th>Gate</th><th>Reason</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>
-<section class='panel policy'><div class='panel-title'>FROZEN POLICY</div><table>{policy_rows}</table><p class='caveat'>SAFE-EXCLUDE removes an event from the current manual-review queue while automated ingestion continues. It is not a maneuver command.</p></section>
-<section class='panel timeline'><div class='panel-title'>EVENT DECISION TIMELINE</div><select id='event-select'></select><div id='event-summary' class='source'></div><div id='timeline' class='timeline-grid'></div></section>
-<section class='panel lineage'><div class='panel-title'>ARTIFACT LINEAGE</div><table><thead><tr><th>Artifact</th><th>SHA-256</th></tr></thead><tbody>{lineage}</tbody></table><div class='source'>model {_escape(calibration.get('model_sha256'))}<br>shift gate {_escape(calibration.get('shift_gate_sha256'))}</div></section>{chain_table_html}{confirmation_html}</div>
+<style>:root{{--bg:#f4f5f7;--panel:#fff;--line:#d8dce2;--text:#20242a;--muted:#68707c;--safe:#246b45;--monitor:#8a5a00;--danger:#a12638;--accent:#315f8c}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}}main{{max-width:1380px;margin:auto;padding:24px}}header{{display:flex;justify-content:space-between;gap:24px;align-items:flex-end;border-bottom:1px solid var(--line);padding-bottom:16px}}h1{{margin:0;font-size:26px;font-weight:600}}.eyebrow{{color:var(--muted);font-size:12px;margin-bottom:4px}}.status{{border:1px solid #d8a4ac;color:var(--danger);background:#fff7f8;padding:7px 10px;border-radius:3px;font-weight:600}}.grid{{display:grid;grid-template-columns:minmax(0,2fr) minmax(280px,1fr);gap:14px;margin-top:14px}}.panel{{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:16px}}.summary,.evidence,.briefing{{grid-column:1/-1}}.active,.timeline{{grid-column:1}}.policy,.lineage{{grid-column:2}}.panel-title{{margin-bottom:12px;color:#394150;font-size:14px;font-weight:600}}.briefing p{{margin:7px 0;max-width:100ch}}.kpis,.evidence-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}}.kpi,.evidence-grid div{{min-width:0;background:#f7f8fa;padding:11px;border:1px solid #e4e7eb;border-left:3px solid var(--accent)}}.kpi span,.kpi small,.evidence-grid span,.evidence-grid small{{display:block;color:var(--muted)}}.kpi strong,.evidence-grid strong{{display:block;font-size:22px;overflow-wrap:anywhere}}.kpi.safe{{border-left-color:var(--safe)}}.kpi.monitor{{border-left-color:var(--monitor)}}.kpi.escalate,.evidence-grid .fail{{border-left-color:var(--danger)}}.evidence-grid .pass{{border-left-color:var(--safe)}}table{{width:100%;border-collapse:collapse;table-layout:auto}}th,td{{padding:8px;border-bottom:1px solid #e6e8ec;text-align:left;vertical-align:top;overflow-wrap:anywhere}}th{{color:var(--muted);font-size:11px;font-weight:600}}.num{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;text-align:right;white-space:nowrap}}.event{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}}.reason,.source{{color:var(--muted);font-size:12px;overflow-wrap:anywhere}}.table-wrap{{max-width:100%;overflow:auto;max-height:620px}}.badge{{display:inline-block;padding:3px 6px;border-radius:3px;font:600 11px ui-monospace,SFMono-Regular,Consolas,monospace;white-space:nowrap}}.badge.safe{{color:#185c38;background:#e8f3ed}}.badge.monitor{{color:#754c00;background:#fff4d6}}.badge.escalate{{color:#8f1e2f;background:#fbeaec}}select{{background:#fff;color:var(--text);border:1px solid #c9ced6;border-radius:3px;padding:8px;width:100%;margin-bottom:12px}}.timeline-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px}}.step{{min-width:0;padding:10px;border:1px solid #dfe3e8;border-radius:3px;background:#fafbfc;overflow-wrap:anywhere}}.step strong,.step span{{display:block}}.step span{{color:var(--muted);font-size:12px}}.caveat{{border-left:3px solid var(--danger);padding:9px 11px;background:#fff7f8;color:#4b2a30;overflow-wrap:anywhere}}.source{{margin-top:10px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-word}}footer{{margin:20px 0 0;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}}@media(max-width:900px){{main{{padding:14px}}header{{flex-direction:column;align-items:flex-start}}.grid{{grid-template-columns:1fr}}.active,.policy,.timeline,.lineage{{grid-column:1}}.kpis,.evidence-grid{{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}}}}@media print{{body{{background:#fff;color:#000}}main{{max-width:none;padding:0}}header{{border-color:#777}}.grid{{display:block}}.panel{{background:#fff;border:1px solid #aaa;box-shadow:none;break-inside:avoid;margin:0 0 10px}}.kpi,.evidence-grid div,.step{{background:#fff}}.status,.caveat,.source,.reason{{color:#000}}.caveat{{background:#fff;border-color:#8f1e2f}}select,footer,.active,.lineage{{display:none}}.timeline{{grid-column:span 12}}.table-wrap{{max-height:none;overflow:visible}}th,td{{border-color:#bbb}}.badge.safe{{color:#176b38;background:#e6f4ec}}.badge.monitor{{color:#6b5000;background:#fdf6e3}}.badge.escalate{{color:#8d001c;background:#fdecea}}}}</style></head><body><main>
+<header><div><div class='eyebrow'>Decision support for conjunction events</div><h1>Sequential CDM Triage · Operator Console</h1><div>Calibrated event-level exclusion policy with auditable message-by-message decisions</div></div><div class='status'>Historical replay · not for operations</div></header><div class='grid'>
+<section class='panel summary'><div class='panel-title'>Current state</div><div class='kpis'><div class='kpi'><span>Active events</span><strong>{events}</strong><small>across {len(audit_paths)} batch(es)</small></div><div class='kpi'><span>Processed updates</span><strong>{updates}</strong><small>message-level count</small></div>{cards}{chain_card}</div><div class='source'>gate: {'active · '+str(audit.loc[blocked,'__event_key'].nunique())+' events blocked' if gate_active else 'not active'} · showing {len(shown)} of {events} events</div></section>{briefing_html}{showcase_html}
+<section class='panel active'><div class='panel-title'>Event queue</div><div class='table-wrap'><table><thead><tr><th>Event</th><th>Current decision</th><th>Score</th><th>TCA, d</th><th>Seq</th><th>History</th><th>Gate</th><th>Reason</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>
+<section class='panel policy'><div class='panel-title'>Policy settings</div><table>{policy_rows}</table><p class='caveat'>SAFE-EXCLUDE removes an event from the current manual-review queue while automated ingestion continues. It is not a maneuver command.</p></section>
+<section class='panel timeline'><div class='panel-title'>Decision history</div><select id='event-select'></select><div id='event-summary' class='source'></div><div id='timeline' class='timeline-grid'></div></section>
+<section class='panel lineage'><div class='panel-title'>Artifact checksums</div><table><thead><tr><th>Artifact</th><th>SHA-256</th></tr></thead><tbody>{lineage}</tbody></table><div class='source'>model {_escape(calibration.get('model_sha256'))}<br>shift gate {_escape(calibration.get('shift_gate_sha256'))}</div></section>{chain_table_html}{confirmation_html}</div>
 <footer>Dataset: ESA Collision Avoidance Challenge, Zenodo 10.5281/zenodo.4463683, CC BY 4.0. Target is high final calculated collision probability, not collision occurrence. Statistical control requires event-level exchangeability and is not an operational guarantee under arbitrary distribution shift.</footer>
 <script>const events={timeline_json};const select=document.getElementById('event-select'),timeline=document.getElementById('timeline'),eventSummary=document.getElementById('event-summary');function esc(s){{return String(s).replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));}}for(const e of events){{const o=document.createElement('option');o.value=e.key;o.textContent=e.label;select.appendChild(o);}}const showcaseKey={json.dumps(None if monitor_to_safe_showcase is None else monitor_to_safe_showcase['event_key'])};if([...select.options].some(o=>o.value===showcaseKey))select.value=showcaseKey;function render(){{const e=events.find(x=>x.key===select.value)||events[0];timeline.innerHTML='';eventSummary.textContent='';if(!e)return;eventSummary.textContent=e.first_safe_sequence===null?'First SAFE-EXCLUDE: none':`First SAFE-EXCLUDE: seq ${{e.first_safe_sequence}} · TCA ${{e.first_safe_tca.toFixed(3)}} d`;for(const u of e.updates){{const d=document.createElement('div');d.className='step';d.innerHTML=`<strong>${{esc(u.decision)}}</strong><span>seq ${{u.sequence}} · TCA ${{u.tca.toFixed(3)}} d</span><span>score ${{u.score.toPrecision(5)}} · history ${{u.history}}</span><span>${{esc(u.reason)}} · gate ${{u.gate?'ALLOW':'BLOCK'}}</span><span><b>Decision explanation:</b> ${{esc(u.explanation)}}</span>`;timeline.appendChild(d);}}}}select.addEventListener('change',render);render();</script></main></body></html>"""
     document = localize_operator_document(document, locale)
