@@ -758,6 +758,21 @@ def seal_collection(ledger_path: str | Path) -> dict[str, Any]:
         return _seal_collection_unlocked(ledger_path)
 
 
+def _label_artifact_matches(path: Path, expected: pd.DataFrame) -> bool:
+    """Return whether an interrupted label output exactly matches re-derived labels."""
+    try:
+        actual = pd.read_parquet(path)
+        pd.testing.assert_frame_equal(
+            actual.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=True,
+            check_like=False,
+        )
+    except (OSError, ValueError, TypeError, AssertionError):
+        return False
+    return True
+
+
 def _close_collection_unlocked(
     ledger_path: str | Path,
     labels_output: str | Path,
@@ -774,9 +789,6 @@ def _close_collection_unlocked(
     label_outputs = [
         labels_output, calibration_labels_output, evaluation_labels_output,
     ]
-    existing = [str(path) for path in label_outputs if path.exists()]
-    if existing:
-        raise FileExistsError(f"Label outputs already exist: {existing}")
     ledger, complete = read_collection(ledger_path)
     if ledger["status"] != "sealed":
         raise ValueError(
@@ -813,16 +825,28 @@ def _close_collection_unlocked(
     evaluation_labels = labels.loc[
         labels["event_id"].astype(str).isin(evaluation_ids)
     ].copy()
+    label_frames = (
+        (labels, labels_output),
+        (calibration_labels, calibration_labels_output),
+        (evaluation_labels, evaluation_labels_output),
+    )
+    recovered: list[Path] = []
+    for frame, path in label_frames:
+        if path.exists():
+            if not _label_artifact_matches(path, frame):
+                raise FileExistsError(
+                    f"Existing label output does not match re-derived labels: {path}"
+                )
+            recovered.append(path)
+
     written: list[Path] = []
     try:
-        for frame, path in (
-            (labels, labels_output),
-            (calibration_labels, calibration_labels_output),
-            (evaluation_labels, evaluation_labels_output),
-        ):
+        for frame, path in label_frames:
+            if path in recovered:
+                continue
             _atomic_parquet(frame, path)
             written.append(path)
-    except Exception:
+    except BaseException:
         for path in written:
             path.unlink(missing_ok=True)
         raise
@@ -851,7 +875,7 @@ def _close_collection_unlocked(
     ledger["positive_events"] = int(labels["y"].sum())
     try:
         _atomic_json(ledger, ledger_path)
-    except Exception:
+    except BaseException:
         for path in label_outputs:
             path.unlink(missing_ok=True)
         raise

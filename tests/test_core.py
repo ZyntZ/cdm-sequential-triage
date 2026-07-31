@@ -5175,6 +5175,86 @@ def _frozen_prospective_study(tmp_path):
     return ledger, study_manifest, study_lock
 
 
+def test_close_collection_recovers_matching_outputs_after_interrupted_ledger_write(
+    tmp_path, monkeypatch
+):
+    import external_collection as collection_module
+
+    ledger, study_manifest, study_lock = _frozen_prospective_study(tmp_path)
+    labels = tmp_path / "labels.parquet"
+    calibration_labels = tmp_path / "calibration-labels.parquet"
+    evaluation_labels = tmp_path / "evaluation-labels.parquet"
+    real_atomic_json = collection_module._atomic_json
+
+    def interrupt_ledger_write(_payload, _path):
+        raise SystemExit("simulated interruption")
+
+    monkeypatch.setattr(collection_module, "_atomic_json", interrupt_ledger_write)
+    with np.testing.assert_raises(SystemExit):
+        close_collection(
+            ledger,
+            labels,
+            study_manifest=study_manifest,
+            study_lock=study_lock,
+            calibration_labels_output=calibration_labels,
+            evaluation_labels_output=evaluation_labels,
+        )
+    assert not labels.exists()
+    assert not calibration_labels.exists()
+    assert not evaluation_labels.exists()
+    assert read_collection(ledger)[0]["status"] == "sealed"
+
+    monkeypatch.setattr(collection_module, "_atomic_json", real_atomic_json)
+    expected_labels = collection_module.derive_event_labels(
+        read_collection(ledger)[1], collection_complete=True
+    )
+    expected_labels.to_parquet(labels, index=False)
+    expected_calibration = expected_labels.loc[
+        expected_labels["event_id"].astype(str).isin(
+            read_locked_study(study_manifest, study_lock)[0]["cohorts"]["calibration"]["event_ids"]
+        )
+    ]
+    expected_calibration.to_parquet(calibration_labels, index=False)
+
+    closed = close_collection(
+        ledger,
+        labels,
+        study_manifest=study_manifest,
+        study_lock=study_lock,
+        calibration_labels_output=calibration_labels,
+        evaluation_labels_output=evaluation_labels,
+    )
+
+    assert closed["status"] == "closed"
+    assert closed["labels_sha256"] == file_sha256(labels)
+    assert closed["calibration_labels_sha256"] == file_sha256(calibration_labels)
+    assert closed["evaluation_labels_sha256"] == file_sha256(evaluation_labels)
+
+
+def test_close_collection_rejects_mismatched_interrupted_label_output(tmp_path):
+    ledger, study_manifest, study_lock = _frozen_prospective_study(tmp_path)
+    labels = tmp_path / "labels.parquet"
+    calibration_labels = tmp_path / "calibration-labels.parquet"
+    evaluation_labels = tmp_path / "evaluation-labels.parquet"
+    pd.DataFrame({"event_id": ["forged"], "y": [0]}).to_parquet(labels, index=False)
+    original = labels.read_bytes()
+
+    with np.testing.assert_raises_regex(FileExistsError, "does not match"):
+        close_collection(
+            ledger,
+            labels,
+            study_manifest=study_manifest,
+            study_lock=study_lock,
+            calibration_labels_output=calibration_labels,
+            evaluation_labels_output=evaluation_labels,
+        )
+
+    assert labels.read_bytes() == original
+    assert not calibration_labels.exists()
+    assert not evaluation_labels.exists()
+    assert read_collection(ledger)[0]["status"] == "sealed"
+
+
 def test_v13_readiness_verifies_study_ledger_cross_binding(tmp_path):
     root = Path(__file__).resolve().parents[1]
     ledger, study_manifest, study_lock = _frozen_prospective_study(tmp_path)
