@@ -159,6 +159,8 @@ def run_demo(output_dir: Path, root: Path = ROOT, locale: str = "en") -> dict:
             "current_event_decisions": dashboard["current_decisions"],
             "batch_chain": dashboard["chain"],
             "confirmation": dashboard["confirmation"],
+            "showcase_monitor_to_safe": dashboard["showcase_monitor_to_safe"],
+            "showcase_gate_blocked": dashboard["showcase_gate_blocked"],
             "caveat": (
                 "confirmation_v1 did not meet the pre-specified UCB criterion; "
                 "this historical replay does not validate the v13 candidate"

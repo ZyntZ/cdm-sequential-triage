@@ -142,6 +142,12 @@ def localize_operator_document(document: str, locale: str) -> str:
         ("criterion.", "критерии."),
         ("correct SAFE-EXCLUDE decisions per 1,000 evaluated events at a median lead of", "корректных решений SAFE-EXCLUDE на 1 000 оценённых событий при медианном упреждении"),
         ("The preregistered v13 candidate remains unopened and is not validated by confirmation_v1.", "Предзарегистрированный кандидат v13 остаётся нераскрытым и не подтверждается результатом confirmation_v1."),
+        ("DETERMINISTIC SHOWCASE", "ВОСПРОИЗВОДИМЫЙ ПРИМЕР"),
+        ("Selected by a frozen display rule: latest decision SAFE-EXCLUDE, a prior MONITOR step, then maximum lead time and trajectory length.", "Выбран фиксированным правилом отображения: последнее решение SAFE-EXCLUDE, ранее был MONITOR, затем максимальное упреждение и длина траектории."),
+        ("First SAFE-EXCLUDE at message", "Первый SAFE-EXCLUDE на сообщении"),
+        ("updates in the trajectory", "обновлений в траектории"),
+        ("Shift-gate case", "Пример shift gate"),
+        ("not available in this replay because confirmation_v1 has no fitted gate. No synthetic case is shown.", "недоступен в этом воспроизведении, поскольку в confirmation_v1 нет обученного gate. Синтетический пример не показывается."),
         ("Active events", "Активные события"), ("Processed updates", "Обработанные сообщения"),
         ("of current events", "текущих событий"), ("across", "в"), ("batch(es)", "пакетах"),
         ("message-level count", "число сообщений"), ("Batch chain", "Цепочка пакетов"),
@@ -282,6 +288,79 @@ def explain_event_sequence(
         "steps": steps,
     }
 
+def select_showcase_monitor_to_safe(audit: pd.DataFrame) -> dict[str, Any]:
+    """Select a reproducible MONITOR-to-SAFE-EXCLUDE trajectory for display."""
+    ordered = audit.sort_values(
+        ["__event_key", "sequence_number", "audit_batch"], kind="mergesort"
+    )
+    current = ordered.drop_duplicates("__event_key", keep="last")
+    candidates: list[dict[str, Any]] = []
+    for key in current.loc[
+        current["decision"].eq(Decision.SAFE_EXCLUDE.value), "__event_key"
+    ]:
+        rows = ordered.loc[ordered["__event_key"].eq(key)]
+        safe = rows.loc[rows["decision"].eq(Decision.SAFE_EXCLUDE.value)]
+        if safe.empty:
+            continue
+        first = safe.iloc[0]
+        prior = rows.loc[rows["sequence_number"] < first["sequence_number"]]
+        if not prior["decision"].eq(Decision.MONITOR.value).any():
+            continue
+        candidates.append({
+            "event_id": (
+                rows.iloc[-1]["event_id"].item()
+                if isinstance(rows.iloc[-1]["event_id"], np.generic)
+                else rows.iloc[-1]["event_id"]
+            ),
+            "event_key": str(key),
+            "first_safe_sequence": int(first["sequence_number"]),
+            "first_safe_tca": float(first["time_to_tca"]),
+            "total_updates": int(len(rows)),
+        })
+    if not candidates:
+        raise ValueError("No MONITOR-to-SAFE-EXCLUDE trajectory exists in the audit")
+    candidates.sort(key=lambda row: (
+        -row["first_safe_tca"], -row["total_updates"], str(row["event_id"])
+    ))
+    return candidates[0]
+
+
+def select_showcase_gate_blocked(audit: pd.DataFrame) -> dict[str, Any] | None:
+    """Select a reproducible shift-gate block, or return None if none occurred."""
+    blocked = audit["reason"].eq("safe_exclude_blocked_by_shift_gate")
+    if not blocked.any():
+        return None
+    ordered = audit.sort_values(
+        ["__event_key", "sequence_number", "audit_batch"], kind="mergesort"
+    )
+    current = ordered.drop_duplicates("__event_key", keep="last").set_index("__event_key")
+    candidates: list[dict[str, Any]] = []
+    for key in ordered.loc[blocked, "__event_key"].unique():
+        rows = ordered.loc[ordered["__event_key"].eq(key)]
+        blocked_rows = rows.loc[rows["reason"].eq("safe_exclude_blocked_by_shift_gate")]
+        shift_scores = blocked_rows["shift_score"].dropna()
+        candidates.append({
+            "event_id": (
+                rows.iloc[-1]["event_id"].item()
+                if isinstance(rows.iloc[-1]["event_id"], np.generic)
+                else rows.iloc[-1]["event_id"]
+            ),
+            "event_key": str(key),
+            "current_decision": str(current.loc[key, "decision"]),
+            "blocked_updates": int(len(blocked_rows)),
+            "max_shift_score": (
+                None if shift_scores.empty else float(shift_scores.max())
+            ),
+        })
+    candidates.sort(key=lambda row: (
+        0 if row["current_decision"] == Decision.MONITOR.value else 1,
+        -row["blocked_updates"],
+        -(row["max_shift_score"] if row["max_shift_score"] is not None else float("-inf")),
+        str(row["event_id"]),
+    ))
+    return candidates[0]
+
+
 def build_dashboard(
     audit_paths: list[Path],
     calibration_path: Path,
@@ -334,7 +413,21 @@ def build_dashboard(
             "clipped": len(chain) > max_chain_rows,
         }
     current = current_events(audit)
+    try:
+        monitor_to_safe_showcase = select_showcase_monitor_to_safe(audit)
+    except ValueError:
+        monitor_to_safe_showcase = None
+    gate_blocked_showcase = select_showcase_gate_blocked(audit)
     shown = current.head(max_events)
+    timeline_current = shown
+    if (
+        monitor_to_safe_showcase is not None
+        and monitor_to_safe_showcase["event_key"] not in set(shown["__event_key"])
+    ):
+        showcase_current = current.loc[
+            current["__event_key"].eq(monitor_to_safe_showcase["event_key"])
+        ]
+        timeline_current = pd.concat([shown, showcase_current], ignore_index=True)
     counts = current["decision"].value_counts()
     events, updates = len(current), len(audit)
     gate_active = audit["shift_score"].notna().any()
@@ -353,7 +446,7 @@ def build_dashboard(
         )
 
     timelines = []
-    shown_keys = shown["__event_key"].tolist()
+    shown_keys = timeline_current["__event_key"].tolist()
     for key in shown_keys:
         frame = audit.loc[audit["__event_key"].eq(key)].sort_values(
             "sequence_number", kind="mergesort"
@@ -408,9 +501,7 @@ def build_dashboard(
             confirmation_summary["correct_safe_excludes_per_1000"] = (
                 1000.0 * int(metrics["safe_negative"]) / evaluation_events
             )
-            confirmation_summary["median_first_safe_tca"] = float(
-                metrics["median_first_safe_tca"]
-            )
+            confirmation_summary["median_first_safe_tca"] = float(metrics["median_first_safe_tca"])
         confirmation_html = f"""
 <section class='panel evidence'><div class='panel-title'>LOCKED CONFIRMATION EVIDENCE</div><div class='evidence-grid'>
 <div><span>Dangerous exclusions</span><strong>{int(metrics['danger_k'])}/{int(metrics['danger_n'])}</strong></div>
@@ -453,6 +544,26 @@ def build_dashboard(
         f"<p>Current queue: <strong>{decision_breakdown}</strong>.</p>"
         f"{briefing_confirmation}</section>"
     )
+    gate_case_text = (
+        "not available in this replay because confirmation_v1 has no fitted gate. "
+        "No synthetic case is shown."
+        if gate_blocked_showcase is None
+        else f"event {_escape(gate_blocked_showcase['event_id'])} · "
+             f"{gate_blocked_showcase['blocked_updates']} blocked updates"
+    )
+    showcase_html = ""
+    if monitor_to_safe_showcase is not None:
+        showcase_html = (
+            "<section id='deterministic-showcase' class='panel summary briefing'>"
+            "<div class='panel-title'>DETERMINISTIC SHOWCASE</div>"
+            "<p>Selected by a frozen display rule: latest decision SAFE-EXCLUDE, a prior "
+            "MONITOR step, then maximum lead time and trajectory length.</p>"
+            f"<p>Event <strong>{_escape(monitor_to_safe_showcase['event_id'])}</strong> · "
+            f"First SAFE-EXCLUDE at message <strong>{monitor_to_safe_showcase['first_safe_sequence']}</strong> · "
+            f"TCA <strong>{monitor_to_safe_showcase['first_safe_tca']:.3f} d</strong> · "
+            f"<strong>{monitor_to_safe_showcase['total_updates']}</strong> updates in the trajectory.</p>"
+            f"<p class='caveat'>Shift-gate case: {gate_case_text}</p></section>"
+        )
 
     policy_rows = "".join(f"<tr><th>{html.escape(k)}</th><td>{_escape(v)}</td></tr>" for k, v in policy.items())
     policy_rows += f"<tr><th>threshold</th><td>{_escape(rule.get('threshold'))}</td></tr><tr><th>calibration rank</th><td>{_escape(rule.get('rank'))} / {_escape(rule.get('n_positive'))}</td></tr><tr><th>PAC bound</th><td>{_escape(rule.get('pac_bound'))}</td></tr>"
@@ -510,16 +621,16 @@ def build_dashboard(
     document = f"""<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>CDM Triage Operator Console</title>
 <style>:root{{--bg:#071018;--panel:#0c1822;--line:#20313d;--text:#e7f0f4;--muted:#8fa5b2;--safe:#51d18a;--monitor:#f1bb4b;--danger:#ff6677;--cyan:#48c7df}}*{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(circle at top right,#122b38,#071018 42%);color:var(--text);font:14px/1.45 Inter,Segoe UI,Arial,sans-serif}}main{{max-width:1500px;margin:auto;padding:24px}}header{{display:flex;justify-content:space-between;gap:24px;align-items:flex-end;border-bottom:1px solid var(--line);padding-bottom:18px}}h1{{margin:0;font-size:28px}}.eyebrow,.panel-title{{color:var(--cyan);font:12px monospace;letter-spacing:.15em}}.status{{border:1px solid var(--monitor);color:var(--monitor);padding:8px 12px;border-radius:4px;font-weight:700}}.grid{{display:grid;grid-template-columns:repeat(12,1fr);gap:16px;margin-top:16px}}.panel{{background:linear-gradient(180deg,#10222d,#09161f);border:1px solid var(--line);border-radius:8px;padding:18px;box-shadow:0 12px 30px #0003}}.summary,.evidence{{grid-column:span 12}}.briefing p{{margin:8px 0;font-size:15px}}.active,.timeline{{grid-column:span 8}}.policy,.lineage{{grid-column:span 4}}.panel-title{{margin-bottom:14px;font-weight:700}}.kpis,.evidence-grid{{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}}.kpi,.evidence-grid div{{background:#09151e;padding:13px;border-left:3px solid var(--cyan)}}.kpi span,.kpi small,.evidence-grid span,.evidence-grid small{{display:block;color:var(--muted)}}.kpi strong,.evidence-grid strong{{font-size:25px}}.kpi.safe{{border-color:var(--safe)}}.kpi.monitor{{border-color:var(--monitor)}}.kpi.escalate,.evidence-grid .fail{{border-color:var(--danger)}}.evidence-grid .pass{{border-color:var(--safe)}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px 10px;border-bottom:1px solid #182a36;text-align:left}}th{{color:var(--muted);font:11px monospace}}.num{{font-family:monospace;text-align:right}}.event{{font-family:monospace}}.reason,.source{{color:var(--muted);font-size:12px}}.table-wrap{{overflow:auto;max-height:620px}}.badge{{padding:3px 7px;border-radius:3px;font:700 11px monospace}}.badge.safe{{color:var(--safe);background:#0f3024}}.badge.monitor{{color:var(--monitor);background:#332713}}.badge.escalate{{color:var(--danger);background:#341722}}select{{background:#09151e;color:var(--text);border:1px solid var(--line);padding:8px;width:100%;margin-bottom:12px}}.timeline-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px}}.step{{padding:10px;border:1px solid var(--line);background:#09151e}}.step strong,.step span{{display:block}}.step span{{color:var(--muted);font-size:12px}}.caveat{{border-left:3px solid var(--danger);padding:10px;background:#21131a}}.source{{margin-top:12px;font-family:monospace;word-break:break-all}}footer{{margin:22px 0;color:var(--muted);font-size:12px}}@media(max-width:980px){{.active,.policy,.timeline,.lineage{{grid-column:span 12}}.kpis,.evidence-grid{{grid-template-columns:1fr 1fr}}header{{flex-direction:column;align-items:flex-start}}}}@media print{{body{{background:#fff;color:#000}}main{{max-width:none;padding:0}}header{{border-color:#777}}.panel{{background:#fff;border:1px solid #aaa;box-shadow:none;break-inside:avoid}}.kpi,.evidence-grid div{{background:#f5f5f5}}.status,.caveat,.source,.reason{{color:#000;border-color:#000}}select,footer,.active,.lineage{{display:none}}.timeline{{grid-column:span 12}}.table-wrap{{max-height:none;overflow:visible}}.badge.safe{{color:#176b38;background:#e6f4ec}}.badge.monitor{{color:#6b5000;background:#fdf6e3}}.badge.escalate{{color:#8d001c;background:#fdecea}}}}</style></head><body><main>
 <header><div><div class='eyebrow'>SPACE TRAFFIC · DECISION SUPPORT</div><h1>Sequential CDM Triage · Operator Console</h1><div>Calibrated event-level exclusion policy with auditable message-by-message decisions</div></div><div class='status'>HISTORICAL DEMO · NOT FOR OPERATIONS</div></header><div class='grid'>
-<section class='panel summary'><div class='panel-title'>CURRENT RUNTIME STATE</div><div class='kpis'><div class='kpi'><span>Active events</span><strong>{events}</strong><small>across {len(audit_paths)} batch(es)</small></div><div class='kpi'><span>Processed updates</span><strong>{updates}</strong><small>message-level count</small></div>{cards}{chain_card}</div><div class='source'>gate: {'active · '+str(audit.loc[blocked,'__event_key'].nunique())+' events blocked' if gate_active else 'not active'} · showing {len(shown)} of {events} events</div></section>{briefing_html}
+<section class='panel summary'><div class='panel-title'>CURRENT RUNTIME STATE</div><div class='kpis'><div class='kpi'><span>Active events</span><strong>{events}</strong><small>across {len(audit_paths)} batch(es)</small></div><div class='kpi'><span>Processed updates</span><strong>{updates}</strong><small>message-level count</small></div>{cards}{chain_card}</div><div class='source'>gate: {'active · '+str(audit.loc[blocked,'__event_key'].nunique())+' events blocked' if gate_active else 'not active'} · showing {len(shown)} of {events} events</div></section>{briefing_html}{showcase_html}
 <section class='panel active'><div class='panel-title'>ACTIVE EVENT QUEUE</div><div class='table-wrap'><table><thead><tr><th>Event</th><th>Current decision</th><th>Score</th><th>TCA, d</th><th>Seq</th><th>History</th><th>Gate</th><th>Reason</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>
 <section class='panel policy'><div class='panel-title'>FROZEN POLICY</div><table>{policy_rows}</table><p class='caveat'>SAFE-EXCLUDE removes an event from the current manual-review queue while automated ingestion continues. It is not a maneuver command.</p></section>
 <section class='panel timeline'><div class='panel-title'>EVENT DECISION TIMELINE</div><select id='event-select'></select><div id='event-summary' class='source'></div><div id='timeline' class='timeline-grid'></div></section>
 <section class='panel lineage'><div class='panel-title'>ARTIFACT LINEAGE</div><table><thead><tr><th>Artifact</th><th>SHA-256</th></tr></thead><tbody>{lineage}</tbody></table><div class='source'>model {_escape(calibration.get('model_sha256'))}<br>shift gate {_escape(calibration.get('shift_gate_sha256'))}</div></section>{chain_table_html}{confirmation_html}</div>
 <footer>Dataset: ESA Collision Avoidance Challenge, Zenodo 10.5281/zenodo.4463683, CC BY 4.0. Target is high final calculated collision probability, not collision occurrence. Statistical control requires event-level exchangeability and is not an operational guarantee under arbitrary distribution shift.</footer>
-<script>const events={timeline_json};const select=document.getElementById('event-select'),timeline=document.getElementById('timeline'),eventSummary=document.getElementById('event-summary');function esc(s){{return String(s).replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));}}for(const e of events){{const o=document.createElement('option');o.value=e.key;o.textContent=e.label;select.appendChild(o);}}function render(){{const e=events.find(x=>x.key===select.value)||events[0];timeline.innerHTML='';eventSummary.textContent='';if(!e)return;eventSummary.textContent=e.first_safe_sequence===null?'First SAFE-EXCLUDE: none':`First SAFE-EXCLUDE: seq ${{e.first_safe_sequence}} · TCA ${{e.first_safe_tca.toFixed(3)}} d`;for(const u of e.updates){{const d=document.createElement('div');d.className='step';d.innerHTML=`<strong>${{esc(u.decision)}}</strong><span>seq ${{u.sequence}} · TCA ${{u.tca.toFixed(3)}} d</span><span>score ${{u.score.toPrecision(5)}} · history ${{u.history}}</span><span>${{esc(u.reason)}} · gate ${{u.gate?'ALLOW':'BLOCK'}}</span><span><b>Decision explanation:</b> ${{esc(u.explanation)}}</span>`;timeline.appendChild(d);}}}}select.addEventListener('change',render);render();</script></main></body></html>"""
+<script>const events={timeline_json};const select=document.getElementById('event-select'),timeline=document.getElementById('timeline'),eventSummary=document.getElementById('event-summary');function esc(s){{return String(s).replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));}}for(const e of events){{const o=document.createElement('option');o.value=e.key;o.textContent=e.label;select.appendChild(o);}}const showcaseKey={json.dumps(None if monitor_to_safe_showcase is None else monitor_to_safe_showcase['event_key'])};if([...select.options].some(o=>o.value===showcaseKey))select.value=showcaseKey;function render(){{const e=events.find(x=>x.key===select.value)||events[0];timeline.innerHTML='';eventSummary.textContent='';if(!e)return;eventSummary.textContent=e.first_safe_sequence===null?'First SAFE-EXCLUDE: none':`First SAFE-EXCLUDE: seq ${{e.first_safe_sequence}} · TCA ${{e.first_safe_tca.toFixed(3)}} d`;for(const u of e.updates){{const d=document.createElement('div');d.className='step';d.innerHTML=`<strong>${{esc(u.decision)}}</strong><span>seq ${{u.sequence}} · TCA ${{u.tca.toFixed(3)}} d</span><span>score ${{u.score.toPrecision(5)}} · history ${{u.history}}</span><span>${{esc(u.reason)}} · gate ${{u.gate?'ALLOW':'BLOCK'}}</span><span><b>Decision explanation:</b> ${{esc(u.explanation)}}</span>`;timeline.appendChild(d);}}}}select.addEventListener('change',render);render();</script></main></body></html>"""
     document = localize_operator_document(document, locale)
     _atomic_write(output_path, document)
-    return {"updates": updates, "events": events, "current_decisions": {d: int(counts.get(d,0)) for d in DECISIONS}, "gate_active": bool(gate_active), "shown_events": len(shown), "chain": chain_summary, "confirmation": confirmation_summary, "locale": locale}
+    return {"updates": updates, "events": events, "current_decisions": {d: int(counts.get(d,0)) for d in DECISIONS}, "gate_active": bool(gate_active), "shown_events": len(shown), "chain": chain_summary, "confirmation": confirmation_summary, "showcase_monitor_to_safe": monitor_to_safe_showcase, "showcase_gate_blocked": gate_blocked_showcase, "locale": locale}
 
 
 def main() -> None:

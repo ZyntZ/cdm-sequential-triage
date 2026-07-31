@@ -36,6 +36,7 @@ from replay_scores import (
 )
 from operator_dashboard import (
     build_dashboard, current_events, explain_event_sequence, load_audits,
+    select_showcase_gate_blocked, select_showcase_monitor_to_safe,
 )
 from evidence_dashboard import build_evidence_dashboard, validate_planning_table
 from run_demo import run_demo, verify_demo_bundle
@@ -3631,6 +3632,68 @@ def test_event_explanation_rejects_unknown_event_and_reason():
         explain_event_sequence("known", audit, policy, threshold=0.20)
 
 
+def test_showcase_selector_prefers_maximum_first_safe_lead():
+    rows = []
+    for event_id, safe_tca, updates in (("A", 6.0, 3), ("B", 5.0, 4)):
+        rows.append({
+            "event_id": event_id, "sequence_number": 1, "time_to_tca": 6.5,
+            "decision": "MONITOR", "reason": "minimum_history_not_reached",
+            "shift_score": np.nan, "audit_batch": 1,
+        })
+        for sequence in range(2, updates + 1):
+            rows.append({
+                "event_id": event_id, "sequence_number": sequence,
+                "time_to_tca": safe_tca - 0.1 * (sequence - 2),
+                "decision": "SAFE-EXCLUDE",
+                "reason": "score_at_or_below_calibrated_threshold",
+                "shift_score": np.nan, "audit_batch": 1,
+            })
+    audit = pd.DataFrame(rows)
+    audit["__event_key"] = audit["event_id"].map(lambda value: f"str:{value}")
+    selected = select_showcase_monitor_to_safe(audit)
+    assert selected["event_id"] == "A"
+    assert selected["first_safe_tca"] == 6.0
+    assert selected["first_safe_sequence"] == 2
+
+
+def test_showcase_selector_requires_prior_monitor():
+    audit = pd.DataFrame([{
+        "event_id": "A", "sequence_number": 1, "time_to_tca": 6.0,
+        "decision": "SAFE-EXCLUDE",
+        "reason": "score_at_or_below_calibrated_threshold",
+        "shift_score": np.nan, "audit_batch": 1, "__event_key": "str:A",
+    }])
+    with np.testing.assert_raises_regex(ValueError, "MONITOR-to-SAFE-EXCLUDE"):
+        select_showcase_monitor_to_safe(audit)
+
+
+def test_gate_showcase_returns_none_without_real_block():
+    audit = pd.DataFrame([{
+        "event_id": "A", "sequence_number": 1, "time_to_tca": 6.0,
+        "decision": "SAFE-EXCLUDE",
+        "reason": "score_at_or_below_calibrated_threshold",
+        "shift_score": np.nan, "audit_batch": 1, "__event_key": "str:A",
+    }])
+    assert select_showcase_gate_blocked(audit) is None
+
+
+def test_gate_showcase_prefers_current_monitor_case():
+    audit = pd.DataFrame([
+        {"event_id": "A", "sequence_number": 1, "time_to_tca": 6.0,
+         "decision": "MONITOR", "reason": "safe_exclude_blocked_by_shift_gate",
+         "shift_score": 3.0, "audit_batch": 1, "__event_key": "str:A"},
+        {"event_id": "B", "sequence_number": 1, "time_to_tca": 6.0,
+         "decision": "MONITOR", "reason": "safe_exclude_blocked_by_shift_gate",
+         "shift_score": 4.0, "audit_batch": 1, "__event_key": "str:B"},
+        {"event_id": "B", "sequence_number": 2, "time_to_tca": 5.5,
+         "decision": "SAFE-EXCLUDE", "reason": "score_at_or_below_calibrated_threshold",
+         "shift_score": np.nan, "audit_batch": 1, "__event_key": "str:B"},
+    ])
+    selected = select_showcase_gate_blocked(audit)
+    assert selected["event_id"] == "A"
+    assert selected["current_decision"] == "MONITOR"
+
+
 def test_operator_dashboard_builds_self_contained_html(tmp_path):
     calibration = tmp_path / "calibration.json"
     calibration.write_text(json.dumps(runtime_calibration_artifact(model_hash="c" * 64)) + "\n")
@@ -3769,9 +3832,6 @@ def test_operator_dashboard_shows_failed_confirmation_honestly(tmp_path):
     assert "NOT MET" in document
     assert "12.10%" in document
     assert "does not validate" in document
-    assert "JUDGE BRIEFING" in document
-    assert "4/73" in document
-    assert "12.10%" in document
 
 
 def test_operator_dashboard_verifies_processed_batch_chain(tmp_path):
@@ -4038,10 +4098,16 @@ def test_one_command_demo_builds_verified_outputs(tmp_path):
     assert "Batch chain" in console
     assert "VERIFIED" in console
     assert "JUDGE BRIEFING" in console
+    assert "DETERMINISTIC SHOWCASE" in console
     assert "22,656" in console
     assert "2,387" in console
     assert "687" in console
     assert "5.53 d" in console
+    assert "Event <strong>5126</strong>" in console
+    assert "TCA <strong>6.542 d</strong>" in console
+    assert "No synthetic case is shown" in console
+    assert summary["showcase_monitor_to_safe"]["event_id"] == 5126
+    assert summary["showcase_gate_blocked"] is None
 
 
 def test_demo_bundle_verification_rejects_tampered_artifact(tmp_path):
