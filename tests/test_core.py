@@ -4154,10 +4154,25 @@ def test_demo_bundle_verification_rejects_incomplete_digest_roster(tmp_path):
         verify_demo_bundle(output, root=root)
 
 
+def test_runtime_audit_event_index_survives_restore(tmp_path):
+    policy = SequentialTriagePolicy(safe_threshold=0.2, minimum_history=1)
+    policy.update("event-a", 6.0, 0.1)
+    checkpoint = tmp_path / "runtime.json"
+    policy.checkpoint(checkpoint)
+
+    restored = SequentialTriagePolicy.restore(checkpoint)
+
+    assert restored._audit_event_ids == {"event-a"}
+    with np.testing.assert_raises_regex(RuntimeError, "Cannot reset an event"):
+        restored.reset_event("event-a")
+    restored.reset_event("event-without-audit")
+
+
 def test_one_command_demo_refuses_protected_and_nonempty_output(tmp_path):
     root = Path(__file__).resolve().parents[1]
-    with np.testing.assert_raises(ValueError):
-        run_demo(root / "artifacts" / "demo", root=root)
+    for directory in ("artifacts", "data", "reports", "src", "scripts", "tests"):
+        with np.testing.assert_raises(ValueError):
+            run_demo(root / directory / "demo", root=root)
 
     output = tmp_path / "existing"
     output.mkdir()

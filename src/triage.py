@@ -106,6 +106,7 @@ class SequentialTriagePolicy:
         self._eligible_counts: dict[Any, int] = {}
         self._last_tca: dict[Any, float] = {}
         self._audit: list[TriageDecision] = []
+        self._audit_event_ids: set[Any] = set()
         self._processed_batches: list[ProcessedBatch] = []
 
     def _decision_for_update(
@@ -190,6 +191,7 @@ class SequentialTriagePolicy:
         self._eligible_counts[event_id] = eligible_history_count
         self._last_tca[event_id] = tca
         self._audit.append(result)
+        self._audit_event_ids.add(event_id)
         return result
 
     def audit_log(self) -> pd.DataFrame:
@@ -329,7 +331,7 @@ class SequentialTriagePolicy:
 
     def reset_event(self, event_id: Any) -> None:
         """Forget untouched event state without invalidating the immutable audit."""
-        if any(decision.event_id == event_id for decision in self._audit):
+        if event_id in self._audit_event_ids:
             raise RuntimeError(
                 "Cannot reset an event after audit records have been written; "
                 "use a new event_id for a new conjunction episode"
@@ -546,8 +548,9 @@ class SequentialTriagePolicy:
                 raise ValueError("Checkpoint audit counters are inconsistent")
             if not np.isfinite(time_to_tca) or time_to_tca < 0 or not np.isfinite(score):
                 raise ValueError("Checkpoint audit contains invalid numeric values")
+            restored_event_id = cls._decode_event_id(record["event_id"])
             policy._audit.append(TriageDecision(
-                event_id=cls._decode_event_id(record["event_id"]),
+                event_id=restored_event_id,
                 sequence_number=sequence_number,
                 time_to_tca=time_to_tca,
                 score=score,
@@ -558,6 +561,7 @@ class SequentialTriagePolicy:
                 decision_window_eligible=bool(record["decision_window_eligible"]),
                 eligible_history_count=eligible_count,
             ))
+            policy._audit_event_ids.add(restored_event_id)
         audit_tails: dict[Any, TriageDecision] = {}
         for decision in policy._audit:
             previous = audit_tails.get(decision.event_id)

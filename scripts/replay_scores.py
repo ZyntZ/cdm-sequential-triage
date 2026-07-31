@@ -161,15 +161,17 @@ def replay_scores(
     if missing:
         raise ValueError(f"Missing replay columns: {sorted(missing)}")
     validate_runtime_continuation(scores, runtime)
-    gate_columns = [] if runtime.shift_gate is None else runtime.shift_gate.feature_columns
-    for row in scores.to_dict(orient="records"):
+    gate_columns = [] if runtime.shift_gate is None else list(runtime.shift_gate.feature_columns)
+    replay_columns = ["event_id", "time_to_tca", score_column, *gate_columns]
+    for values in scores.loc[:, replay_columns].itertuples(index=False, name=None):
+        event_id, time_to_tca, score, *gate_values = values
         gate_features = (
-            None if not gate_columns else {column: row[column] for column in gate_columns}
+            None if not gate_columns else dict(zip(gate_columns, gate_values, strict=True))
         )
         runtime.update(
-            event_id=row["event_id"],
-            time_to_tca=row["time_to_tca"],
-            score=row[score_column],
+            event_id=event_id,
+            time_to_tca=time_to_tca,
+            score=score,
             gate_features=gate_features,
         )
     return runtime.audit_log()

@@ -99,9 +99,11 @@ def run_demo(output_dir: Path, root: Path = ROOT, locale: str = "en") -> dict:
     if locale not in SUPPORTED_LOCALES:
         raise ValueError(f"Unsupported locale: {locale}")
     output_dir = output_dir.resolve()
-    protected = [root / "artifacts", root / "data", root / "src", root / "scripts"]
+    protected = [
+        root / name for name in ("artifacts", "data", "reports", "src", "scripts", "tests")
+    ]
     if any(_inside(output_dir, path) for path in protected):
-        raise ValueError("Demo output directory must be outside source and artifact directories")
+        raise ValueError("Demo output directory must be outside repository content directories")
     if output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(f"Demo output directory is not empty: {output_dir}")
 
