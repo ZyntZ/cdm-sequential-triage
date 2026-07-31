@@ -131,6 +131,17 @@ def localize_operator_document(document: str, locale: str) -> str:
         ("Calibrated event-level exclusion policy with auditable message-by-message decisions", "Калиброванная event-level политика с аудитом решения после каждого сообщения"),
         ("HISTORICAL DEMO · NOT FOR OPERATIONS", "ИСТОРИЧЕСКАЯ ДЕМОНСТРАЦИЯ · НЕ ДЛЯ ЭКСПЛУАТАЦИИ"),
         ("CURRENT RUNTIME STATE", "ТЕКУЩЕЕ СОСТОЯНИЕ"),
+        ("JUDGE BRIEFING", "КРАТКО ДЛЯ ЭКСПЕРТА"),
+        ("This historical replay processed", "В историческом воспроизведении обработано"),
+        ("CDM updates across", "обновлений CDM по"),
+        ("event trajectories in the decision window.", "траекториям событий в рабочем окне."),
+        ("Current queue:", "Текущая очередь:"),
+        ("The locked confirmation observed", "В замороженном подтверждающем эксперименте получено"),
+        ("dangerous exclusions; the one-sided 95% upper bound was", "опасных исключений; односторонняя 95%-я верхняя граница составила"),
+        ("against the", "при"),
+        ("criterion.", "критерии."),
+        ("correct SAFE-EXCLUDE decisions per 1,000 evaluated events at a median lead of", "корректных решений SAFE-EXCLUDE на 1 000 оценённых событий при медианном упреждении"),
+        ("The preregistered v13 candidate remains unopened and is not validated by confirmation_v1.", "Предзарегистрированный кандидат v13 остаётся нераскрытым и не подтверждается результатом confirmation_v1."),
         ("Active events", "Активные события"), ("Processed updates", "Обработанные сообщения"),
         ("of current events", "текущих событий"), ("across", "в"), ("batch(es)", "пакетах"),
         ("message-level count", "число сообщений"), ("Batch chain", "Цепочка пакетов"),
@@ -390,6 +401,16 @@ def build_dashboard(
         criterion = float(policy["alpha"])
         passed = float(metrics["danger_ucb"]) <= criterion
         confirmation_summary = {"danger_k": int(metrics["danger_k"]), "danger_n": int(metrics["danger_n"]), "danger_ucb": float(metrics["danger_ucb"]), "criterion": criterion, "passed": passed}
+        if "evaluation_events" in confirmation and "safe_negative" in metrics:
+            evaluation_events = int(confirmation["evaluation_events"])
+            if evaluation_events <= 0:
+                raise ValueError("Confirmation evaluation_events must be positive")
+            confirmation_summary["correct_safe_excludes_per_1000"] = (
+                1000.0 * int(metrics["safe_negative"]) / evaluation_events
+            )
+            confirmation_summary["median_first_safe_tca"] = float(
+                metrics["median_first_safe_tca"]
+            )
         confirmation_html = f"""
 <section class='panel evidence'><div class='panel-title'>LOCKED CONFIRMATION EVIDENCE</div><div class='evidence-grid'>
 <div><span>Dangerous exclusions</span><strong>{int(metrics['danger_k'])}/{int(metrics['danger_n'])}</strong></div>
@@ -399,6 +420,39 @@ def build_dashboard(
 <div><span>Median lead time</span><strong>{float(metrics['median_first_safe_tca']):.2f} d</strong></div></div>
 <p class='caveat'>Historical confirmation_v1 evidence. The primary criterion was not met. This does not validate the preregistered v13 candidate.</p>
 <div class='source'>confirmation {_escape(confirmation_path.name)} · sha256 {file_sha256(confirmation_path)}</div></section>"""
+
+    decision_breakdown = " · ".join(
+        f"{decision} {int(counts.get(decision, 0)):,}" for decision in DECISIONS
+    )
+    briefing_confirmation = ""
+    if confirmation_summary is not None:
+        result = "MET" if confirmation_summary["passed"] else "NOT MET"
+        briefing_confirmation = (
+            "<p>The locked confirmation observed "
+            f"<strong>{confirmation_summary['danger_k']}/{confirmation_summary['danger_n']}</strong> "
+            "dangerous exclusions; the one-sided 95% upper bound was "
+            f"<strong>{100*confirmation_summary['danger_ucb']:.2f}%</strong> against the "
+            f"<strong>{100*confirmation_summary['criterion']:.2f}%</strong> criterion: "
+            f"<strong>{result}</strong>.</p>"
+        )
+        if "correct_safe_excludes_per_1000" in confirmation_summary:
+            briefing_confirmation += (
+                f"<p><strong>{confirmation_summary['correct_safe_excludes_per_1000']:.0f}</strong> "
+                "correct SAFE-EXCLUDE decisions per 1,000 evaluated events at a median lead of "
+                f"<strong>{confirmation_summary['median_first_safe_tca']:.2f} d</strong>.</p>"
+            )
+        briefing_confirmation += (
+            "<p class='caveat'>The preregistered v13 candidate remains unopened and "
+            "is not validated by confirmation_v1.</p>"
+        )
+    briefing_html = (
+        "<section id='judge-briefing' class='panel summary briefing'>"
+        "<div class='panel-title'>JUDGE BRIEFING</div>"
+        f"<p>This historical replay processed <strong>{updates:,}</strong> CDM updates "
+        f"across <strong>{events:,}</strong> event trajectories in the decision window.</p>"
+        f"<p>Current queue: <strong>{decision_breakdown}</strong>.</p>"
+        f"{briefing_confirmation}</section>"
+    )
 
     policy_rows = "".join(f"<tr><th>{html.escape(k)}</th><td>{_escape(v)}</td></tr>" for k, v in policy.items())
     policy_rows += f"<tr><th>threshold</th><td>{_escape(rule.get('threshold'))}</td></tr><tr><th>calibration rank</th><td>{_escape(rule.get('rank'))} / {_escape(rule.get('n_positive'))}</td></tr><tr><th>PAC bound</th><td>{_escape(rule.get('pac_bound'))}</td></tr>"
@@ -454,9 +508,9 @@ def build_dashboard(
 <div class='source'>status {_escape(chain_summary['status'])} · head {_escape(chain_summary['head_sha256'])}{clipped_note}</div></section>"""
 
     document = f"""<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>CDM Triage Operator Console</title>
-<style>:root{{--bg:#071018;--panel:#0c1822;--line:#20313d;--text:#e7f0f4;--muted:#8fa5b2;--safe:#51d18a;--monitor:#f1bb4b;--danger:#ff6677;--cyan:#48c7df}}*{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(circle at top right,#122b38,#071018 42%);color:var(--text);font:14px/1.45 Inter,Segoe UI,Arial,sans-serif}}main{{max-width:1500px;margin:auto;padding:24px}}header{{display:flex;justify-content:space-between;gap:24px;align-items:flex-end;border-bottom:1px solid var(--line);padding-bottom:18px}}h1{{margin:0;font-size:28px}}.eyebrow,.panel-title{{color:var(--cyan);font:12px monospace;letter-spacing:.15em}}.status{{border:1px solid var(--monitor);color:var(--monitor);padding:8px 12px;border-radius:4px;font-weight:700}}.grid{{display:grid;grid-template-columns:repeat(12,1fr);gap:16px;margin-top:16px}}.panel{{background:linear-gradient(180deg,#10222d,#09161f);border:1px solid var(--line);border-radius:8px;padding:18px;box-shadow:0 12px 30px #0003}}.summary,.evidence{{grid-column:span 12}}.active,.timeline{{grid-column:span 8}}.policy,.lineage{{grid-column:span 4}}.panel-title{{margin-bottom:14px;font-weight:700}}.kpis,.evidence-grid{{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}}.kpi,.evidence-grid div{{background:#09151e;padding:13px;border-left:3px solid var(--cyan)}}.kpi span,.kpi small,.evidence-grid span,.evidence-grid small{{display:block;color:var(--muted)}}.kpi strong,.evidence-grid strong{{font-size:25px}}.kpi.safe{{border-color:var(--safe)}}.kpi.monitor{{border-color:var(--monitor)}}.kpi.escalate,.evidence-grid .fail{{border-color:var(--danger)}}.evidence-grid .pass{{border-color:var(--safe)}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px 10px;border-bottom:1px solid #182a36;text-align:left}}th{{color:var(--muted);font:11px monospace}}.num{{font-family:monospace;text-align:right}}.event{{font-family:monospace}}.reason,.source{{color:var(--muted);font-size:12px}}.table-wrap{{overflow:auto;max-height:620px}}.badge{{padding:3px 7px;border-radius:3px;font:700 11px monospace}}.badge.safe{{color:var(--safe);background:#0f3024}}.badge.monitor{{color:var(--monitor);background:#332713}}.badge.escalate{{color:var(--danger);background:#341722}}select{{background:#09151e;color:var(--text);border:1px solid var(--line);padding:8px;width:100%;margin-bottom:12px}}.timeline-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px}}.step{{padding:10px;border:1px solid var(--line);background:#09151e}}.step strong,.step span{{display:block}}.step span{{color:var(--muted);font-size:12px}}.caveat{{border-left:3px solid var(--danger);padding:10px;background:#21131a}}.source{{margin-top:12px;font-family:monospace;word-break:break-all}}footer{{margin:22px 0;color:var(--muted);font-size:12px}}@media(max-width:980px){{.active,.policy,.timeline,.lineage{{grid-column:span 12}}.kpis,.evidence-grid{{grid-template-columns:1fr 1fr}}header{{flex-direction:column;align-items:flex-start}}}}@media print{{body{{background:#fff;color:#000}}main{{max-width:none;padding:0}}header{{border-color:#777}}.panel{{background:#fff;border:1px solid #aaa;box-shadow:none;break-inside:avoid}}.kpi,.evidence-grid div{{background:#f5f5f5}}.status,.caveat,.source,.reason{{color:#000;border-color:#000}}select,footer,.active,.lineage{{display:none}}.timeline{{grid-column:span 12}}.table-wrap{{max-height:none;overflow:visible}}.badge.safe{{color:#176b38;background:#e6f4ec}}.badge.monitor{{color:#6b5000;background:#fdf6e3}}.badge.escalate{{color:#8d001c;background:#fdecea}}}}</style></head><body><main>
+<style>:root{{--bg:#071018;--panel:#0c1822;--line:#20313d;--text:#e7f0f4;--muted:#8fa5b2;--safe:#51d18a;--monitor:#f1bb4b;--danger:#ff6677;--cyan:#48c7df}}*{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(circle at top right,#122b38,#071018 42%);color:var(--text);font:14px/1.45 Inter,Segoe UI,Arial,sans-serif}}main{{max-width:1500px;margin:auto;padding:24px}}header{{display:flex;justify-content:space-between;gap:24px;align-items:flex-end;border-bottom:1px solid var(--line);padding-bottom:18px}}h1{{margin:0;font-size:28px}}.eyebrow,.panel-title{{color:var(--cyan);font:12px monospace;letter-spacing:.15em}}.status{{border:1px solid var(--monitor);color:var(--monitor);padding:8px 12px;border-radius:4px;font-weight:700}}.grid{{display:grid;grid-template-columns:repeat(12,1fr);gap:16px;margin-top:16px}}.panel{{background:linear-gradient(180deg,#10222d,#09161f);border:1px solid var(--line);border-radius:8px;padding:18px;box-shadow:0 12px 30px #0003}}.summary,.evidence{{grid-column:span 12}}.briefing p{{margin:8px 0;font-size:15px}}.active,.timeline{{grid-column:span 8}}.policy,.lineage{{grid-column:span 4}}.panel-title{{margin-bottom:14px;font-weight:700}}.kpis,.evidence-grid{{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}}.kpi,.evidence-grid div{{background:#09151e;padding:13px;border-left:3px solid var(--cyan)}}.kpi span,.kpi small,.evidence-grid span,.evidence-grid small{{display:block;color:var(--muted)}}.kpi strong,.evidence-grid strong{{font-size:25px}}.kpi.safe{{border-color:var(--safe)}}.kpi.monitor{{border-color:var(--monitor)}}.kpi.escalate,.evidence-grid .fail{{border-color:var(--danger)}}.evidence-grid .pass{{border-color:var(--safe)}}table{{width:100%;border-collapse:collapse}}th,td{{padding:9px 10px;border-bottom:1px solid #182a36;text-align:left}}th{{color:var(--muted);font:11px monospace}}.num{{font-family:monospace;text-align:right}}.event{{font-family:monospace}}.reason,.source{{color:var(--muted);font-size:12px}}.table-wrap{{overflow:auto;max-height:620px}}.badge{{padding:3px 7px;border-radius:3px;font:700 11px monospace}}.badge.safe{{color:var(--safe);background:#0f3024}}.badge.monitor{{color:var(--monitor);background:#332713}}.badge.escalate{{color:var(--danger);background:#341722}}select{{background:#09151e;color:var(--text);border:1px solid var(--line);padding:8px;width:100%;margin-bottom:12px}}.timeline-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px}}.step{{padding:10px;border:1px solid var(--line);background:#09151e}}.step strong,.step span{{display:block}}.step span{{color:var(--muted);font-size:12px}}.caveat{{border-left:3px solid var(--danger);padding:10px;background:#21131a}}.source{{margin-top:12px;font-family:monospace;word-break:break-all}}footer{{margin:22px 0;color:var(--muted);font-size:12px}}@media(max-width:980px){{.active,.policy,.timeline,.lineage{{grid-column:span 12}}.kpis,.evidence-grid{{grid-template-columns:1fr 1fr}}header{{flex-direction:column;align-items:flex-start}}}}@media print{{body{{background:#fff;color:#000}}main{{max-width:none;padding:0}}header{{border-color:#777}}.panel{{background:#fff;border:1px solid #aaa;box-shadow:none;break-inside:avoid}}.kpi,.evidence-grid div{{background:#f5f5f5}}.status,.caveat,.source,.reason{{color:#000;border-color:#000}}select,footer,.active,.lineage{{display:none}}.timeline{{grid-column:span 12}}.table-wrap{{max-height:none;overflow:visible}}.badge.safe{{color:#176b38;background:#e6f4ec}}.badge.monitor{{color:#6b5000;background:#fdf6e3}}.badge.escalate{{color:#8d001c;background:#fdecea}}}}</style></head><body><main>
 <header><div><div class='eyebrow'>SPACE TRAFFIC · DECISION SUPPORT</div><h1>Sequential CDM Triage · Operator Console</h1><div>Calibrated event-level exclusion policy with auditable message-by-message decisions</div></div><div class='status'>HISTORICAL DEMO · NOT FOR OPERATIONS</div></header><div class='grid'>
-<section class='panel summary'><div class='panel-title'>CURRENT RUNTIME STATE</div><div class='kpis'><div class='kpi'><span>Active events</span><strong>{events}</strong><small>across {len(audit_paths)} batch(es)</small></div><div class='kpi'><span>Processed updates</span><strong>{updates}</strong><small>message-level count</small></div>{cards}{chain_card}</div><div class='source'>gate: {'active · '+str(audit.loc[blocked,'__event_key'].nunique())+' events blocked' if gate_active else 'not active'} · showing {len(shown)} of {events} events</div></section>
+<section class='panel summary'><div class='panel-title'>CURRENT RUNTIME STATE</div><div class='kpis'><div class='kpi'><span>Active events</span><strong>{events}</strong><small>across {len(audit_paths)} batch(es)</small></div><div class='kpi'><span>Processed updates</span><strong>{updates}</strong><small>message-level count</small></div>{cards}{chain_card}</div><div class='source'>gate: {'active · '+str(audit.loc[blocked,'__event_key'].nunique())+' events blocked' if gate_active else 'not active'} · showing {len(shown)} of {events} events</div></section>{briefing_html}
 <section class='panel active'><div class='panel-title'>ACTIVE EVENT QUEUE</div><div class='table-wrap'><table><thead><tr><th>Event</th><th>Current decision</th><th>Score</th><th>TCA, d</th><th>Seq</th><th>History</th><th>Gate</th><th>Reason</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>
 <section class='panel policy'><div class='panel-title'>FROZEN POLICY</div><table>{policy_rows}</table><p class='caveat'>SAFE-EXCLUDE removes an event from the current manual-review queue while automated ingestion continues. It is not a maneuver command.</p></section>
 <section class='panel timeline'><div class='panel-title'>EVENT DECISION TIMELINE</div><select id='event-select'></select><div id='event-summary' class='source'></div><div id='timeline' class='timeline-grid'></div></section>

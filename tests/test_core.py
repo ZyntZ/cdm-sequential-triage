@@ -3769,6 +3769,9 @@ def test_operator_dashboard_shows_failed_confirmation_honestly(tmp_path):
     assert "NOT MET" in document
     assert "12.10%" in document
     assert "does not validate" in document
+    assert "JUDGE BRIEFING" in document
+    assert "4/73" in document
+    assert "12.10%" in document
 
 
 def test_operator_dashboard_verifies_processed_batch_chain(tmp_path):
@@ -4034,6 +4037,11 @@ def test_one_command_demo_builds_verified_outputs(tmp_path):
     assert "NOT MET" in console
     assert "Batch chain" in console
     assert "VERIFIED" in console
+    assert "JUDGE BRIEFING" in console
+    assert "22,656" in console
+    assert "2,387" in console
+    assert "687" in console
+    assert "5.53 d" in console
 
 
 def test_demo_bundle_verification_rejects_tampered_artifact(tmp_path):
