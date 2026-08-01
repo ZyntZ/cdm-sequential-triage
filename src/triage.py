@@ -83,8 +83,8 @@ class SequentialTriagePolicy:
         min_days_to_tca: float = 2.0,
         max_days_to_tca: float = 7.0,
     ):
-        if np.isnan(safe_threshold):
-            raise ValueError("safe_threshold must not be NaN")
+        if not np.isfinite(safe_threshold):
+            raise ValueError("safe_threshold must be finite")
         if minimum_history < 1:
             raise ValueError("minimum_history must be at least one")
         if not 0 <= min_days_to_tca < max_days_to_tca:

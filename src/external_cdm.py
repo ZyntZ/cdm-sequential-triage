@@ -68,13 +68,15 @@ def _source_text(source: str | Path | bytes) -> str:
         return source.decode("utf-8-sig")
     if isinstance(source, Path):
         return source.read_text(encoding="utf-8-sig")
-    if "\n" not in source and "\r" not in source:
-        try:
-            candidate = Path(source)
-            if candidate.exists():
-                return candidate.read_text(encoding="utf-8-sig")
-        except OSError:
-            pass
+    stripped = source.lstrip()
+    if (
+        "\n" not in source
+        and "\r" not in source
+        and not stripped.startswith(("{", "["))
+    ):
+        candidate = Path(source)
+        if candidate.exists():
+            return candidate.read_text(encoding="utf-8-sig")
     return source
 
 

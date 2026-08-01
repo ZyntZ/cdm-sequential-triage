@@ -23,6 +23,12 @@ def event_policy_table(prefix_scores: pd.DataFrame, score_col: str) -> pd.DataFr
     label_counts = prefix_scores.groupby("event_id")["y"].nunique()
     if (label_counts != 1).any():
         raise ValueError("Each event_id must have one event-level label")
+    time_to_tca = pd.to_numeric(prefix_scores["time_to_tca"], errors="coerce")
+    scores = pd.to_numeric(prefix_scores[score_col], errors="coerce")
+    if not np.isfinite(time_to_tca).all() or (time_to_tca < 0).any():
+        raise ValueError("time_to_tca must be finite and non-negative")
+    if not np.isfinite(scores).all():
+        raise ValueError(f"{score_col} must contain only finite numeric values")
     return prefix_scores.groupby("event_id", as_index=False).agg(
         y=("y", "first"),
         min_score=(score_col, "min"),

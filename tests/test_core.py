@@ -269,6 +269,18 @@ def test_external_cdm_parser_accepts_array_and_ndjson():
     assert len(parse_cdm_json(json.dumps(first) + "\n" + json.dumps(second))) == 2
 
 
+def test_external_cdm_inline_json_is_not_resolved_as_a_path(monkeypatch):
+    inline = json.dumps(external_cdm_record(
+        "m1", "2026-01-01T00:00:00Z", "2026-01-07T00:00:00Z"
+    ))
+
+    def unexpected_exists(_path):
+        raise AssertionError("inline JSON must not be checked as a filesystem path")
+
+    monkeypatch.setattr(Path, "exists", unexpected_exists)
+    assert parse_cdm_source(inline)[0]["CDM_ID"] == "m1"
+
+
 def cdm_kvn(message_id, creation_date, tca, probability=1e-7):
     return f"""CCSDS_CDM_VERS = 1.0
 CREATION_DATE = {creation_date}
@@ -1289,6 +1301,15 @@ def test_calibrated_threshold_is_strict_with_ties():
     assert np.sum(scores <= result["threshold"]) == 0
 
 
+def test_event_policy_table_rejects_invalid_numeric_inputs():
+    frame = sample().rename(columns={"risk": "score"})
+    for column, value in (("time_to_tca", -1.0), ("time_to_tca", np.inf), ("score", np.nan)):
+        invalid = frame.copy()
+        invalid.loc[0, column] = value
+        with np.testing.assert_raises(ValueError):
+            event_policy_table(invalid, "score")
+
+
 def test_event_labels_must_be_constant():
     x = sample().rename(columns={"risk": "score"})
     x.loc[x.index[1], "y"] = 0
@@ -1991,6 +2012,12 @@ def test_minimum_history_counts_only_updates_inside_decision_window():
     assert [item.eligible_history_count for item in decisions] == [0, 0, 1, 2, 3]
     assert decisions[-2].decision == Decision.MONITOR
     assert decisions[-1].decision == Decision.SAFE_EXCLUDE
+
+
+def test_runtime_rejects_non_finite_safe_threshold():
+    for threshold in (np.nan, np.inf, -np.inf):
+        with np.testing.assert_raises(ValueError):
+            SequentialTriagePolicy(threshold)
 
 
 def test_runtime_rejects_invalid_decision_window():
